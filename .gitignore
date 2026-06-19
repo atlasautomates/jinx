@@ -1,0 +1,10 @@
+# SwiftPM build products
+.build/
+
+# Local intermediates (test harnesses, scratch)
+.tmp/
+
+# macOS / Xcode
+.DS_Store
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
