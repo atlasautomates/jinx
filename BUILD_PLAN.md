@@ -201,15 +201,24 @@ Build/run via XcodeBuildMCP (already in `.mcp.json`).
 
 ## 8. Supabase integration
 
-- **Read-only.** `leads` table primary; related `lead_interactions`,
-  `campaigns_tracking` for timeline/sentiment widgets. *(Verify exact columns against
-  the live schema at M1 — the MCP timed out during planning; known fields incl.
-  `company`, `first_name`, `email`, `industry`, `source`, `web_research_json`,
-  sentiment + campaign fields.)*
-- Client: prefer `supabase-swift` (SPM); fallback = thin REST against PostgREST.
-- **Read-only/limited key in Keychain** — never hardcoded (CLAUDE.md security rule).
+- **Read-only.** `leads` table primary; `lead_enrichment` (lead_tier,
+  enrichment_status, web_research_json), `replies` (sentiment, intent), and
+  `lead_interactions` (timeline) for richer widgets. Schema grounded in
+  `.claude/shared/supabase_client.py` (`map_lead_to_supabase` is the column contract);
+  live-DB MCP timed out, but the shared client is authoritative.
+- **Client: dependency-free PostgREST over URLSession** (decided at M1, revised from
+  `supabase-swift`). We only read (SELECT); avoids a remote SPM dependency and its
+  build-resolution risk on flaky networks. Revisit `supabase-swift` only if realtime/
+  auth/storage is ever needed.
+- **API key in macOS Keychain** — never hardcoded, no env-default fallback; app fails
+  closed (setup prompt) if absent. Mirrors the Python infra's local service-key use;
+  if ever distributed, switch to anon key + an RLS read policy.
 - Swift aggregates rows client-side into the §3 widget-data shapes.
 - **No PII in logs** or in the `claude -p` prompt (field catalog + aggregates only).
+- Project: `YOUR-PROJECT-REF` → `https://YOUR-PROJECT-REF.supabase.co/rest/v1`
+  (authoritative source = `.env SUPABASE_URL`). NOTE: `.mcp.json` carries a **stale
+  ref** `fcgmdeeckzlbwiymorvy` (DNS NXDOMAIN) — the likely cause of the Supabase MCP
+  timeouts; fixing that ref should restore the MCP too.
 
 ---
 
@@ -244,6 +253,7 @@ Each milestone: build & verify it renders before moving on.
 1. **Default view = all enriched leads**, with a campaign filter in M3. (vs. per-campaign on launch)
 2. **System serif fallback for display font in v0**; bundle Playfair Display later. (vs. bundle now)
 3. **v0 grid honors `w`/`h` spans only**; absolute `(x,y)` free-placement in v1. (vs. full grid at v0)
-4. **`supabase-swift` via SPM** for the client. (vs. raw PostgREST REST)
+4. ~~`supabase-swift` via SPM~~ → **resolved at M1: dependency-free PostgREST over
+   URLSession** (read-only; no remote dependency to resolve). See §8.
 
 None block M0 (renderer + design system, all mock data).

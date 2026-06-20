@@ -7,6 +7,9 @@ struct LeadDashboardApp: App {
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.run()
         }
+        if CommandLine.arguments.contains("--check-supabase") {
+            SupabaseCheck.run()
+        }
     }
 
     var body: some Scene {
