@@ -5,8 +5,13 @@ import Foundation
 struct LeadsRepository {
     let client: SupabaseClient
 
+    /// Exact total number of leads in the table.
+    func totalCount() async throws -> Int {
+        try await client.count("leads")
+    }
+
     /// Most recently added leads.
-    func recentLeads(limit: Int = 50) async throws -> [LeadRow] {
+    func recentLeads(limit: Int = 1000) async throws -> [LeadRow] {
         let data = try await client.get("leads", [
             URLQueryItem(name: "select",
                          value: "id,company_name,first_name,industry,lead_source,city,state,created_at"),

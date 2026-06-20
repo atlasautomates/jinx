@@ -1,28 +1,39 @@
 import SwiftUI
 
 struct RootView: View {
-    private let dashboard = MockData.dashboard
+    @State private var model = DashboardViewModel()
 
     var body: some View {
-        Group {
-            if let dashboard {
-                DashboardShell(dashboard: dashboard)
-            } else {
-                // Fail-closed placeholder (M0 controls the JSON, so this should
-                // never appear; in M2 a decode failure falls back to a default layout).
-                VStack(spacing: Space.s3) {
-                    Text("Couldn't load the dashboard layout.")
-                        .font(.ui(14, weight: .medium))
-                        .foregroundStyle(Palette.textPrimary)
-                    Text("Mock layout/widget JSON failed to decode.")
-                        .font(.ui(12))
-                        .foregroundStyle(Palette.textMuted)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Palette.bgRoot)
-            }
+        content
+            .preferredColorScheme(.dark)
+            .frame(minWidth: 820, minHeight: 600)
+            .task { await model.load() }   // initial load on appear
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.state {
+        case .idle, .loading:
+            LoadingView()
+
+        case .loaded(let dashboard):
+            DashboardShell(
+                dashboard: dashboard,
+                isRefreshing: model.isRefreshing,
+                onRefresh: { Task { await model.load() } }
+            )
+
+        case .stale(let dashboard, _, let message):
+            // Keep the data on screen; surface the refresh failure as a banner.
+            DashboardShell(
+                dashboard: dashboard,
+                isRefreshing: model.isRefreshing,
+                staleMessage: message,
+                onRefresh: { Task { await model.load() } }
+            )
+
+        case .failed(let message):
+            ErrorView(message: message, onRetry: { Task { await model.load() } })
         }
-        .preferredColorScheme(.dark)
-        .frame(minWidth: 820, minHeight: 600)
     }
 }

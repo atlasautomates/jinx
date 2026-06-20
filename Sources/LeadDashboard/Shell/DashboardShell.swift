@@ -2,6 +2,10 @@ import SwiftUI
 
 struct DashboardShell: View {
     let dashboard: Dashboard
+    var isRefreshing: Bool = false
+    /// Non-nil when the displayed data is stale (last refresh failed); carries the reason.
+    var staleMessage: String? = nil
+    var onRefresh: (() -> Void)? = nil
 
     var body: some View {
         GeometryReader { geo in
@@ -10,9 +14,15 @@ struct DashboardShell: View {
             let bp = dashboard.layout.breakpointName(forWidth: Double(gridWidth))
 
             VStack(spacing: 0) {
-                Toolbar(breakpoint: bp)
+                Toolbar(breakpoint: bp, isRefreshing: isRefreshing, onRefresh: onRefresh)
                     .padding(.horizontal, pad)
                     .padding(.vertical, Space.s4)
+
+                if let staleMessage {
+                    StaleBanner(message: staleMessage)
+                        .padding(.horizontal, pad)
+                        .padding(.bottom, Space.s3)
+                }
 
                 ScrollView {
                     WidgetGrid(
@@ -29,8 +39,30 @@ struct DashboardShell: View {
     }
 }
 
+/// Inline warning shown above the grid when data couldn't be refreshed.
+private struct StaleBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: Space.s2) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(StatusStyle.orange.fg)
+            Text("Showing last loaded data — couldn't refresh: \(message)")
+                .font(.ui(12))
+                .foregroundStyle(Palette.textSecondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Space.s3)
+        .padding(.vertical, Space.s2)
+        .background(RoundedRectangle(cornerRadius: Radius.md).fill(StatusStyle.orange.bg))
+    }
+}
+
 private struct Toolbar: View {
     let breakpoint: String
+    let isRefreshing: Bool
+    let onRefresh: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -49,19 +81,33 @@ private struct Toolbar: View {
                     .overlay(Capsule().stroke(Palette.accentBorder, lineWidth: 1))
                     .foregroundStyle(Palette.accent)
 
-                Button(action: {}) {
-                    Text("Re-layout")
-                        .font(.ui(12, weight: .medium))
+                ToolbarButton(label: isRefreshing ? "Refreshing…" : "Refresh",
+                              enabled: !isRefreshing && onRefresh != nil) {
+                    onRefresh?()
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, Space.s3)
-                .padding(.vertical, Space.s2)
-                .background(RoundedRectangle(cornerRadius: Radius.md).fill(Palette.bgElevated))
-                .overlay(RoundedRectangle(cornerRadius: Radius.md).stroke(Palette.borderDefault, lineWidth: 1))
-                .foregroundStyle(Palette.textMuted)
-                .disabled(true)   // wired up in M2
-                .help("Adaptive re-layout arrives in M2 (claude -p)")
+
+                ToolbarButton(label: "Re-layout", enabled: false) {}
+                    .help("Adaptive re-layout arrives in M2 (claude -p)")
             }
         }
+    }
+}
+
+private struct ToolbarButton: View {
+    let label: String
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label).font(.ui(12, weight: .medium))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Space.s3)
+        .padding(.vertical, Space.s2)
+        .background(RoundedRectangle(cornerRadius: Radius.md).fill(Palette.bgElevated))
+        .overlay(RoundedRectangle(cornerRadius: Radius.md).stroke(Palette.borderDefault, lineWidth: 1))
+        .foregroundStyle(enabled ? Palette.textSecondary : Palette.textMuted)
+        .disabled(!enabled)
     }
 }

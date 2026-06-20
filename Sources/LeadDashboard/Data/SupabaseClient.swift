@@ -53,8 +53,8 @@ struct SupabaseClient {
         return SupabaseClient(baseURL: SupabaseConfig.restURL, apiKey: key)
     }
 
-    /// Read-only GET against a PostgREST table. Returns the raw JSON body.
-    func get(_ table: String, _ queryItems: [URLQueryItem]) async throws -> Data {
+    /// Build a signed GET request for a table + query items. Shared by `get`/`count`.
+    private func makeRequest(_ table: String, _ queryItems: [URLQueryItem]) throws -> URLRequest {
         guard var comps = URLComponents(
             url: baseURL.appendingPathComponent(table),
             resolvingAgainstBaseURL: false
@@ -68,18 +68,51 @@ struct SupabaseClient {
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 15
+        return req
+    }
 
+    /// Validate the HTTP response and surface a typed error on non-2xx.
+    private func validate(_ data: Data, _ response: URLResponse) throws -> HTTPURLResponse {
+        guard let http = response as? HTTPURLResponse else {
+            throw ClientError.transport("non-HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            // PostgREST error bodies describe the query, not the key — safe to surface.
+            throw ClientError.http(status: http.statusCode,
+                                   body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return http
+    }
+
+    /// Read-only GET against a PostgREST table. Returns the raw JSON body.
+    func get(_ table: String, _ queryItems: [URLQueryItem]) async throws -> Data {
+        let req = try makeRequest(table, queryItems)
         do {
             let (data, response) = try await session.data(for: req)
-            guard let http = response as? HTTPURLResponse else {
-                throw ClientError.transport("non-HTTP response")
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                // PostgREST error bodies describe the query, not the key — safe to surface.
-                throw ClientError.http(status: http.statusCode,
-                                       body: String(data: data, encoding: .utf8) ?? "")
-            }
+            _ = try validate(data, response)
             return data
+        } catch let error as ClientError {
+            throw error
+        } catch {
+            throw ClientError.transport(error.localizedDescription)
+        }
+    }
+
+    /// Exact row count for a table (optionally filtered), via PostgREST's
+    /// `Prefer: count=exact` + a 0-0 range — returns the total without pulling rows.
+    /// Parsed from the `Content-Range: 0-0/<total>` header.
+    func count(_ table: String, _ queryItems: [URLQueryItem] = []) async throws -> Int {
+        var req = try makeRequest(table, [URLQueryItem(name: "select", value: "id")] + queryItems)
+        req.setValue("count=exact", forHTTPHeaderField: "Prefer")
+        req.setValue("0-0", forHTTPHeaderField: "Range")
+        do {
+            let (data, response) = try await session.data(for: req)
+            let http = try validate(data, response)
+            guard let range = http.value(forHTTPHeaderField: "Content-Range"),
+                  let total = range.split(separator: "/").last,
+                  let n = Int(total)
+            else { throw ClientError.transport("missing Content-Range count header") }
+            return n
         } catch let error as ClientError {
             throw error
         } catch {
