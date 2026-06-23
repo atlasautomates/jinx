@@ -93,6 +93,27 @@ enum SelfTest {
             problems.append("builder: gap chart is not a chart")
         }
 
+        // Packer (M2): an LLM plan must expand to a grid with NO overlaps and every
+        // rect in-bounds, at every breakpoint — the "can't make a broken grid" guarantee.
+        let plan = LayoutPlan(widgets: [
+            PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: 1),
+            PlannedWidget(type: .kpi, bind: "enriched", size: .small, priority: 2),
+            PlannedWidget(type: .statusBoard, bind: "by-source", size: .medium, priority: 3),
+            PlannedWidget(type: .chart, bind: "added-weekly", size: .large, priority: 4),
+            PlannedWidget(type: .table, bind: "recent-leads", size: .full, priority: 5),
+            PlannedWidget(type: .kpi, bind: "total-leads", size: .large, priority: 6), // dup bind
+        ])
+        let packed = Packer.pack(plan)
+        problems.append(contentsOf: validateGrid(packed, label: "packer"))
+        if packed.widgets.count != 5 {
+            problems.append("packer: expected 5 widgets after dedupe, got \(packed.widgets.count)")
+        }
+        // A full-width widget must occupy its own row width at lg (span == cols).
+        if let table = packed.widgets.first(where: { $0.id == "recent-leads" }),
+           let r = table.layouts["lg"], r.w != 12 {
+            problems.append("packer: full-size widget should span all 12 lg cols, got \(r.w)")
+        }
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
@@ -110,5 +131,56 @@ enum SelfTest {
         case .table: return "table"
         case .statusBoard: return "status-board"
         }
+    }
+
+    /// Assert a LayoutSpec is renderable at every breakpoint: each widget has a rect,
+    /// each rect in-bounds (0 ≤ x, x+w ≤ cols, w/h ≥ 1), and no two widgets overlap.
+    /// Checks the UNION of every breakpoint source (spec.breakpoints, spec.cols, and
+    /// each widget's layout keys) so a rect emitted for a breakpoint the spec disagrees
+    /// on can't slip past unvalidated, and asserts per-breakpoint rect presence — both
+    /// guard against a future packer regression, not just today's output.
+    private static func validateGrid(_ spec: LayoutSpec, label: String) -> [String] {
+        var problems: [String] = []
+        var bps = Set(spec.breakpoints.keys)
+        bps.formUnion(spec.cols.keys)
+        for w in spec.widgets { bps.formUnion(w.layouts.keys) }
+
+        for bp in bps.sorted() {
+            guard let cols = spec.cols[bp] else {
+                problems.append("\(label): no cols defined for breakpoint '\(bp)'")
+                continue
+            }
+            var rects: [(id: String, r: GridRect)] = []
+            for widget in spec.widgets {
+                guard let rect = widget.layouts[bp] else {
+                    problems.append("\(label): widget '\(widget.id)' missing rect at \(bp)")
+                    continue
+                }
+                rects.append((widget.id, rect))
+            }
+            for (id, r) in rects {
+                if r.x < 0 || r.y < 0 || r.w < 1 || r.h < 1 {
+                    problems.append("\(label): widget '\(id)' has invalid rect at \(bp) (\(r.x),\(r.y),\(r.w),\(r.h))")
+                }
+                if r.x + r.w > cols {
+                    problems.append("\(label): widget '\(id)' overflows \(bp) cols (\(r.x)+\(r.w) > \(cols))")
+                }
+            }
+            for i in rects.indices {
+                for j in (i + 1)..<rects.count {
+                    if overlaps(rects[i].r, rects[j].r) {
+                        problems.append("\(label): '\(rects[i].id)' overlaps '\(rects[j].id)' at \(bp)")
+                    }
+                }
+            }
+        }
+        return problems
+    }
+
+    /// Half-open rectangle intersection on the integer grid.
+    private static func overlaps(_ a: GridRect, _ b: GridRect) -> Bool {
+        let xOverlap = a.x < b.x + b.w && b.x < a.x + a.w
+        let yOverlap = a.y < b.y + b.h && b.y < a.y + a.h
+        return xOverlap && yOverlap
     }
 }
