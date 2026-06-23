@@ -63,10 +63,15 @@ v0 widget library.
 
 ---
 
-## 3. The layout-spec contract (LLM output target)
+## 3. The layout-spec contract (renderer input)
 
-Verbatim shape from the template, lead-adapted. This is what the `dashboard-layout`
-skill must emit and what Swift decodes:
+Verbatim shape from the template, lead-adapted — what `WidgetGrid` renders.
+
+> **Note (M2 refinement):** the LLM no longer emits this directly. In M2 the model
+> emits the smaller, enum-constrained **layout plan** (§6.1) and a deterministic Swift
+> **`Packer`** expands it into the `LayoutSpec` below. So this remains the renderer's
+> contract; the geometry (`x,y,w,h`) is machine-generated, never model-generated. In
+> M1 this spec is produced by `DashboardBuilder`'s fixed layout.
 
 ```jsonc
 {
@@ -147,32 +152,90 @@ The template uses a 12-col `react-grid-layout` with `rowHeight: 80` and free
 
 ---
 
-## 6. Inference layer — `claude -p`
+## 6. Inference layer — M2 adaptive layout (Haiku, cache-gated)
 
-`LayoutEngine` spawns the Claude Code CLI headless:
+**Decided 2026-06-23.** Model = **Haiku 4.5** (cheapest; the task is constrained
+structured output, not open reasoning). Cadence = regenerate on open / refresh /
+hourly, **all gated by an "if-changed" check** — never on a timer alone.
 
+### 6.1 The accuracy move: LLM *plans*, Swift *places*
+
+Do **not** have Haiku emit grid geometry (`x,y,w,h`) — small models produce overlaps
+and out-of-bounds rects, and geometry is the easiest thing to get wrong. Instead the
+LLM emits a **constrained layout plan** (which widgets, emphasis, order) and a
+**deterministic Swift packer** turns that into the valid responsive `LayoutSpec` of §3.
+This is the single biggest accuracy lever: Haiku makes only *semantic* choices (pick
+from enums), and it is structurally impossible for it to emit a broken grid.
+
+**LLM output — the layout plan (small, enum-constrained):**
+```jsonc
+{ "widgets": [
+    { "type": "kpi",          "bind": "total-leads", "size": "small",  "priority": 1 },
+    { "type": "status-board", "bind": "by-source",   "size": "medium", "priority": 2 },
+    { "type": "chart",        "bind": "added-weekly", "size": "large",  "priority": 3 },
+    { "type": "table",        "bind": "recent-leads", "size": "full",   "priority": 4 }
+] }
 ```
-claude -p "<request>" --output-format json     (cwd = repo, so the skill loads)
-```
+- `type` ∈ registered `WidgetType`; `bind` ∈ a **fixed catalog of data series the
+  builder can produce** (total-leads, by-source, by-industry, added-weekly,
+  by-tier, sentiment-mix, recent-leads, …); `size` ∈ `{small, medium, large, full}`;
+  `priority` orders placement. Max ~6 widgets.
+- **`Packer.pack(plan, viewport) -> LayoutSpec`** (new, pure, deterministic): maps
+  size→column span per breakpoint, bin-packs by priority into the 12/10/6-col grids,
+  emits non-overlapping rects for lg/md/sm. Reuses `WidgetGrid.sanitize` as a backstop.
+- `DashboardBuilder` already produces the widget *data* for each `bind`; M2 only swaps
+  the **fixed layout** for a packed plan. Unbound/unknown `bind`s are dropped.
 
-- **`dashboard-layout` skill** (`.claude/skills/dashboard-layout/`) holds the prompt
-  logic: input = field catalog + viewport + widget-type catalog; output = a
-  `LayoutSpec` JSON conforming to §3. Versioned, reusable, follows skill conventions.
-- Swift parses the `--output-format json` envelope → `.result` → extracts/validates
-  the layout JSON.
-- **Fail-closed:** decode via Codable + check invariants (known `type`s, valid
-  breakpoints, no NaN spans). On any failure → render a **deterministic default
-  layout** (one KPI row + one leads table). The screen never blanks.
-- **Caching:** key on `(sorted field-set + breakpoint-bucket)`. Persist to App
-  Support. Regenerate only when the data *shape* changes or the user hits
-  "Re-layout". A normal open does **zero** LLM calls → near-zero credit use.
-- **No PII to the model:** the prompt carries field *names/types/counts* and at most
-  a tiny anonymized sample — the model picks widgets, Swift binds real rows locally.
+### 6.2 `dashboard-layout` skill + `LayoutEngine`
 
-> ⚠️ **Agent SDK credit:** `claude -p` runs on the Max sub but is metered against the
-> monthly Agent SDK credit ($200/mo, no rollover), overflowing to metered API beyond
-> that. With layout-spec caching, real usage is a handful of small calls — credit
-> easily covers it. Flagged so it stays a deliberate choice.
+- **`dashboard-layout` skill** (`.claude/skills/dashboard-layout/`) holds the prompt:
+  the widget-type + bind + size-class catalogs, the rules, and **2–3 few-shot
+  (profile → plan) examples** (few-shot is a major accuracy lever for Haiku).
+- **`LayoutEngine`** spawns: `claude -p "<profile+viewport>" --model claude-haiku-4-5
+  --output-format json --system-prompt "<layout rules>" --max-turns 1` (no tools),
+  run from a **temp cwd, NOT the repo**, so Arcane's large `CLAUDE.md` / all skills do
+  **not** load — keeps Haiku's context tiny and undistracted (accuracy + cost). Parse
+  the JSON envelope → `.result` → decode the plan.
+
+### 6.3 Haiku accuracy checklist (apply all)
+
+1. **Constrained plan, not geometry** (§6.1) — can't emit a broken grid.
+2. **Slim, dedicated system prompt** — enumerate valid `type`/`bind`/`size` values,
+   the max-widget cap, and "output ONLY the JSON plan, no prose." Run outside the repo
+   so the big project context doesn't crowd the window.
+3. **Few-shot examples** (2–3) of profile → plan in the skill.
+4. **Single-shot, no tools** (`--max-turns 1`) — nothing to wander into.
+5. **Validate + ONE repair retry** — decode the plan against the enums; on failure,
+   re-prompt once with the parse error; if it still fails → **fail-closed to the
+   deterministic default layout** (the fixed M1 layout in `DashboardBuilder`). Caps
+   cost at ≤2 calls and never blanks.
+6. **Determinism** — low effort; the constrained schema leaves little to vary.
+
+### 6.4 Cache-gating (the cost control)
+
+- **Cache key = hash(data profile + viewport bucket).** The *data profile* is a coarse
+  signal vector — for each candidate `bind`: present? how strong? (distinct-category
+  count, % non-null, row volume bucketed). This is what makes the layout *adaptive*
+  (a campaign rich in sentiment shows a sentiment widget; a sparse one doesn't) while
+  changing slowly enough to stay cheap.
+- **Every trigger — open, manual Refresh, hourly tick — recomputes the key and only
+  calls Haiku if it changed** ("if-changed" gate; per user 2026-06-23 this includes
+  Refresh). Cold start (no cached plan) generates once. Refresh always re-fetches data
+  but only re-generates the layout when the profile shifts. Cached plan persists to
+  App Support; the packed `LayoutSpec` is recomputed deterministically from the plan.
+- **No PII to the model:** the profile carries series names + coarse stats only; the
+  model picks widgets, Swift binds real rows locally.
+
+### 6.5 Cost
+
+Haiku 4.5 ($1/$5 per MTok), slim prompt (~3K in / ~1K out ≈ **$0.008/call**),
+cache-gated → calls only on profile change (a handful/week). **Est. < $1/mo** against
+the $200 Agent SDK credit. Worst case (force every hour, ungated) ≈ $8/mo — avoided by
+the if-changed gate.
+
+> ⚠️ **Agent SDK credit:** `claude -p` is metered against the $200/mo Max credit (no
+> rollover), API overflow beyond. This design keeps usage negligible — a deliberate,
+> cheap choice.
 
 ---
 
@@ -186,9 +249,13 @@ builds/lead-dashboard/
     Theme/          DesignTokens.swift, Components.swift (Card, Badge, …)
     Models/         LayoutSpec.swift, WidgetData.swift, ThemeConfig.swift
     Data/
-      SupabaseClient.swift           (read-only; key in Keychain)
-      LayoutEngine.swift             (claude -p invocation + validation)
-      LayoutCache.swift, DataStore.swift
+      SupabaseClient.swift           (read-only; key in Keychain)        [M1 ✓]
+      LeadsRepository.swift, DashboardBuilder.swift                       [M1 ✓]
+      LayoutEngine.swift             (claude -p Haiku invocation + parse) [M2]
+      LayoutPlan.swift               (enum-constrained plan model, §6.1)  [M2]
+      Packer.swift                   (plan → LayoutSpec, deterministic)   [M2]
+      DataProfile.swift              (coarse signal vector for cache key) [M2]
+      LayoutCache.swift              (key = profile+viewport, App Support)[M2]
     Widgets/        WidgetRegistry.swift, KpiCard.swift, DataTable.swift,
                     ChartWidget.swift, StatusBoard.swift
     Grid/           WidgetGrid.swift, WidgetWrapper.swift
@@ -224,14 +291,19 @@ Build/run via XcodeBuildMCP (already in `.mcp.json`).
 
 ## 9. v0 milestones
 
-- **M0 — Renderer + design system.** Xcode scaffold, `DesignTokens.swift`, a
-  *hardcoded* `layout.json` renders all 4 widget types with mock data. Proves the
-  grid + house look. *(No Supabase, no LLM yet.)*
-- **M1 — Real data.** Supabase fetch → bind real leads into widget data.
-- **M2 — Adaptive layout.** `dashboard-layout` skill + `LayoutEngine` (`claude -p`)
-  + schema validation + fail-closed default + caching.
-- **M3 — Responsive + controls.** Window-resize breakpoint switching, "Re-layout"
-  button, campaign/view filter.
+- **M0 ✓ — Renderer + design system.** Hardcoded layout renders all 4 widget types
+  with mock data. Proves the grid + house look.
+- **M1 ✓ — Real data.** Supabase fetch (anon key) → bind real leads → widget data;
+  `Loadable` state model; chart polish + auto-hiding titlebar.
+- **M2 — Adaptive layout (Haiku, cache-gated).** Per §6: `dashboard-layout` skill +
+  `LayoutEngine` (`claude -p --model claude-haiku-4-5`, run outside the repo, single-
+  shot) emits an enum-constrained **plan**; `Packer` deterministically expands it to a
+  `LayoutSpec`; `DataProfile`-keyed cache gates every trigger (open/refresh/hourly) on
+  **if-changed**; validate + 1 repair retry → fail-closed to the M1 fixed layout.
+  Suggested sub-steps: (a) `LayoutPlan` + `Packer` + tests (no LLM); (b) `DataProfile`
+  + cache + if-changed gate; (c) `LayoutEngine` + skill + wire the Refresh/hourly path.
+- **M3 — Responsive + controls.** Window-resize breakpoint switching (partly in M1),
+  campaign/view filter, expose the "Re-layout" button (force-regenerate, bypass gate).
 
 Each milestone: build & verify it renders before moving on.
 
@@ -248,12 +320,12 @@ Each milestone: build & verify it renders before moving on.
 
 ---
 
-## 11. Open decisions (recommended defaults in **bold**)
+## 11. Decisions log
 
-1. **Default view = all enriched leads**, with a campaign filter in M3. (vs. per-campaign on launch)
-2. **System serif fallback for display font in v0**; bundle Playfair Display later. (vs. bundle now)
-3. **v0 grid honors `w`/`h` spans only**; absolute `(x,y)` free-placement in v1. (vs. full grid at v0)
-4. ~~`supabase-swift` via SPM~~ → **resolved at M1: dependency-free PostgREST over
-   URLSession** (read-only; no remote dependency to resolve). See §8.
-
-None block M0 (renderer + design system, all mock data).
+1. Default view = all leads; campaign filter deferred to M3. *(open — M3)*
+2. ~~Display font~~ → **resolved (M0): system serif fallback**; bundle Playfair later if wanted.
+3. ~~Grid placement~~ → **resolved (M0): absolute `(x,y,w,h)` placement** per breakpoint (the planned "v1" landed early).
+4. ~~`supabase-swift` via SPM~~ → **resolved (M1): dependency-free PostgREST over URLSession** (read-only). See §8.
+5. ~~Service key vs anon+RLS~~ → **resolved (2026-06-23): anon key** (read-only, RLS-subject). See §8 + memory `reference_supabase_access`.
+6. ~~M2 model / cadence~~ → **resolved (2026-06-23): Haiku 4.5, cache-gated, if-changed on every trigger incl. Refresh.** See §6.
+7. *(open — M2)* Whether the "Re-layout" button force-regenerates (bypass the gate) — leaning yes, as the one manual override.
