@@ -24,7 +24,9 @@ struct ChartWidgetView: View {
                         y: .value("Value", point.y)
                     )
                     .foregroundStyle(Palette.accent)
-                    .interpolationMethod(.catmullRom)
+                    // monotone: smooth but never overshoots the data range — counts
+                    // can't go negative, so catmullRom's dips below zero would lie.
+                    .interpolationMethod(.monotone)
                     .lineStyle(StrokeStyle(lineWidth: 2))
 
                     AreaMark(
@@ -32,7 +34,7 @@ struct ChartWidgetView: View {
                         y: .value("Value", point.y)
                     )
                     .foregroundStyle(Palette.accent.opacity(0.12))
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.monotone)
                 }
             }
             .chartXAxis {

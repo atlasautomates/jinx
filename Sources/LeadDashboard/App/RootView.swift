@@ -2,11 +2,15 @@ import SwiftUI
 
 struct RootView: View {
     @State private var model = DashboardViewModel()
+    // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
+    // `installed` guard stays true and only one hover view is ever injected. Don't demote.
+    @State private var titlebarHover = TitlebarHover()
 
     var body: some View {
         content
             .preferredColorScheme(.dark)
             .frame(minWidth: 820, minHeight: 600)
+            .background(WindowAccessor { titlebarHover.attach(to: $0) })
             .task { await model.load() }   // initial load on appear
     }
 

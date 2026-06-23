@@ -21,7 +21,7 @@ struct LeadDashboardApp: App {
                     NSApplication.shared.activate(ignoringOtherApps: true)
                 }
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)   // merge titlebar into content; traffic lights auto-hide (TitlebarHover)
         .defaultSize(width: 1280, height: 860)
     }
 }

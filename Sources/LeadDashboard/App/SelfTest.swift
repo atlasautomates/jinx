@@ -75,6 +75,24 @@ enum SelfTest {
             problems.append("builder: chart exceeded 8 buckets")
         }
 
+        // Zero-fill: leads 3 weeks apart must produce 4 contiguous weekly points (gaps = 0),
+        // not 2 collapsed points.
+        let gapLeads: [LeadRow] = [
+            LeadRow(id: "g1", companyName: "X", firstName: nil, industry: nil,
+                    leadSource: "a", city: nil, state: nil, createdAt: "2026-05-04T00:00:00+00:00"),
+            LeadRow(id: "g2", companyName: "Y", firstName: nil, industry: nil,
+                    leadSource: "a", city: nil, state: nil, createdAt: "2026-05-25T00:00:00+00:00"),
+        ]
+        let gapBuilt = DashboardBuilder.build(fetched: gapLeads, totalCount: 2)
+        if case .chart(let chart)? = gapBuilt.widgets["added-weekly"] {
+            let zeros = chart.points.filter { $0.y == 0 }.count
+            if chart.points.count != 4 || zeros != 2 {
+                problems.append("builder: zero-fill expected 4 points/2 zeros, got \(chart.points.count) points/\(zeros) zeros")
+            }
+        } else {
+            problems.append("builder: gap chart is not a chart")
+        }
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")

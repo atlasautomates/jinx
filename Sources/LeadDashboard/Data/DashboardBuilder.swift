@@ -78,12 +78,24 @@ enum DashboardBuilder {
         label.dateFormat = "MMM d"
         label.timeZone = cal.timeZone
 
-        let points = buckets
-            .sorted { $0.key < $1.key }
-            .suffix(8)
-            .map { ChartPoint(x: label.string(from: $0.key), y: Double($0.value)) }
+        // Zero-fill: walk every consecutive week from first to last present in the data
+        // so gap weeks render as real zeros (even x-axis spacing), not collapsed away.
+        // The step uses the SAME `cal` that produced the bucket keys above — if the
+        // bucketing calendar/timezone ever changes, this stepping must change with it
+        // or `buckets[cursor]` lookups would miss and every gap week would read 0.
+        guard let first = buckets.keys.min(), let last = buckets.keys.max() else {
+            return .chart(ChartData(title: "Leads Added / Week" + titleSuffix, kind: .line, points: []))
+        }
+        var filled: [(week: Date, count: Int)] = []
+        var cursor = first
+        while cursor <= last {
+            filled.append((cursor, buckets[cursor] ?? 0))
+            guard let next = cal.date(byAdding: .weekOfYear, value: 1, to: cursor) else { break }
+            cursor = next
+        }
+        let points = filled.suffix(8).map { ChartPoint(x: label.string(from: $0.week), y: Double($0.count)) }
 
-        return .chart(ChartData(title: "Leads Added / Week" + titleSuffix, kind: .line, points: Array(points)))
+        return .chart(ChartData(title: "Leads Added / Week" + titleSuffix, kind: .line, points: points))
     }
 
     /// Most-recent leads (already ordered by created_at desc from the query).
