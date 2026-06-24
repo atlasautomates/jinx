@@ -8,3 +8,8 @@
 .DS_Store
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
+
+# XcodeGen-generated artifacts (reproduced by xcode/build.sh from project.yml)
+xcode/LeadDashboard.xcodeproj/
+xcode/Generated/
+xcode/build/

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Not App-Sandboxed: Developer-ID distribution. The app needs outbound network
+         (Supabase REST), Keychain read (its anon API key), and to spawn the `claude`
+         CLI (the Haiku layout call) — all available to a non-sandboxed app, so no
+         special exceptions are required. Hardened Runtime is on via build setting
+         (required for notarization). -->
+</dict>
+</plist>
