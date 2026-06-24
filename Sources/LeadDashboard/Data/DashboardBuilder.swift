@@ -7,6 +7,11 @@ import Foundation
 /// trivially testable and the UI layer stays declarative.
 enum DashboardBuilder {
 
+    /// The data series `widgetData` produces — the ONLY binds a plan may reference.
+    /// Single source of truth for prompt generation (step C) and bind validation.
+    /// Must stay in sync with the keys returned by `widgets(leads:totalCount:)`.
+    static let availableBinds: Set<String> = ["total-leads", "by-source", "added-weekly", "recent-leads"]
+
     /// Compose a dashboard from a (possibly cached or LLM-generated) plan + the leads.
     /// `fetched` = the recent-leads window pulled; `totalCount` = exact table total.
     static func compose(fetched leads: [LeadRow], totalCount: Int, plan: LayoutPlan) -> Dashboard {

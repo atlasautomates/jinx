@@ -11,7 +11,18 @@ struct RootView: View {
             .preferredColorScheme(.dark)
             .frame(minWidth: 820, minHeight: 600)
             .background(WindowAccessor { titlebarHover.attach(to: $0) })
-            .task { await model.load() }   // initial load on appear
+            .task { await model.load() }       // initial load on appear
+            .task { await hourlyRefresh() }    // re-fetch hourly; layout re-gens only if changed
+    }
+
+    /// Re-fetch every hour while the app is open. Data refreshes; the layout passes
+    /// through the if-changed gate, so Haiku is called only when the profile shifted.
+    private func hourlyRefresh() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 3_600 * 1_000_000_000)
+            if Task.isCancelled { break }
+            await model.load()
+        }
     }
 
     @ViewBuilder
@@ -24,7 +35,8 @@ struct RootView: View {
             DashboardShell(
                 dashboard: dashboard,
                 isRefreshing: model.isRefreshing,
-                onRefresh: { Task { await model.load() } }
+                onRefresh: { Task { await model.load() } },
+                onRelayout: { Task { await model.load(force: true) } }
             )
 
         case .stale(let dashboard, _, let message):
@@ -33,7 +45,8 @@ struct RootView: View {
                 dashboard: dashboard,
                 isRefreshing: model.isRefreshing,
                 staleMessage: message,
-                onRefresh: { Task { await model.load() } }
+                onRefresh: { Task { await model.load() } },
+                onRelayout: { Task { await model.load(force: true) } }
             )
 
         case .failed(let message):

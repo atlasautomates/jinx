@@ -10,6 +10,9 @@ struct LeadDashboardApp: App {
         if CommandLine.arguments.contains("--check-supabase") {
             SupabaseCheck.run()
         }
+        if CommandLine.arguments.contains("--probe-layout-engine") {
+            LayoutEngineProbe.run()
+        }
     }
 
     var body: some Scene {

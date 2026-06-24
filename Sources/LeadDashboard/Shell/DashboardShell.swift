@@ -6,6 +6,8 @@ struct DashboardShell: View {
     /// Non-nil when the displayed data is stale (last refresh failed); carries the reason.
     var staleMessage: String? = nil
     var onRefresh: (() -> Void)? = nil
+    /// Force-regenerate the layout via Haiku, bypassing the if-changed gate.
+    var onRelayout: (() -> Void)? = nil
 
     var body: some View {
         GeometryReader { geo in
@@ -14,7 +16,8 @@ struct DashboardShell: View {
             let bp = dashboard.layout.breakpointName(forWidth: Double(gridWidth))
 
             VStack(spacing: 0) {
-                Toolbar(breakpoint: bp, isRefreshing: isRefreshing, onRefresh: onRefresh)
+                Toolbar(breakpoint: bp, isRefreshing: isRefreshing,
+                        onRefresh: onRefresh, onRelayout: onRelayout)
                     .padding(.horizontal, pad)
                     .padding(.vertical, Space.s4)
 
@@ -63,6 +66,7 @@ private struct Toolbar: View {
     let breakpoint: String
     let isRefreshing: Bool
     let onRefresh: (() -> Void)?
+    let onRelayout: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -86,8 +90,11 @@ private struct Toolbar: View {
                     onRefresh?()
                 }
 
-                ToolbarButton(label: "Re-layout", enabled: false) {}
-                    .help("Adaptive re-layout arrives in M2 (claude -p)")
+                ToolbarButton(label: "Re-layout",
+                              enabled: !isRefreshing && onRelayout != nil) {
+                    onRelayout?()
+                }
+                .help("Regenerate the layout with Haiku, ignoring the cache")
             }
         }
     }

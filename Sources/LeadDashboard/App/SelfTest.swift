@@ -142,24 +142,56 @@ enum SelfTest {
             problems.append("profile: a non-magnitude (by-source) shift didn't change the key")
         }
 
-        // LayoutCache round-trip + LayoutResolver gate, in a throwaway temp dir.
+        // availableBinds must match exactly what widgetData produces (drift guard).
+        let dataKeys = Set(DashboardBuilder.widgetData(fetched: sampleLeads, totalCount: 720).keys)
+        if dataKeys != DashboardBuilder.availableBinds {
+            problems.append("builder: availableBinds \(DashboardBuilder.availableBinds) != widgetData keys \(dataKeys)")
+        }
+
+        // sanitize (step C bind-validation): valid plan passes; nil/empty/unknown-bind → default.
+        let knownBinds = DashboardBuilder.availableBinds
+        if LayoutResolver.sanitize(DefaultLayout.plan, knownBinds: knownBinds) != DefaultLayout.plan {
+            problems.append("sanitize: a valid default plan should pass through")
+        }
+        if LayoutResolver.sanitize(nil, knownBinds: knownBinds) != DefaultLayout.plan {
+            problems.append("sanitize: nil should fall back to default")
+        }
+        if LayoutResolver.sanitize(LayoutPlan(widgets: []), knownBinds: knownBinds) != DefaultLayout.plan {
+            problems.append("sanitize: empty plan should fall back to default")
+        }
+        let badBind = LayoutPlan(widgets: [PlannedWidget(type: .kpi, bind: "hallucinated", size: .small, priority: 1)])
+        if LayoutResolver.sanitize(badBind, knownBinds: knownBinds) != DefaultLayout.plan {
+            problems.append("sanitize: unknown bind should fall back to default (cache-poison guard)")
+        }
+
+        // LayoutEngine.parsePlan: envelope unwrap + fence stripping.
+        let goodEnvelope = #"{"is_error":false,"result":"```json\n{\"widgets\":[{\"type\":\"kpi\",\"bind\":\"total-leads\",\"size\":\"small\",\"priority\":1}]}\n```"}"#
+        if LayoutEngine.parsePlan(fromEnvelope: goodEnvelope)?.widgets.first?.bind != "total-leads" {
+            problems.append("engine: failed to parse a fenced plan from the envelope")
+        }
+        if LayoutEngine.parsePlan(fromEnvelope: #"{"is_error":true,"result":"refused"}"#) != nil {
+            problems.append("engine: an is_error envelope should yield nil")
+        }
+        if LayoutEngine.parsePlan(fromEnvelope: "not json at all") != nil {
+            problems.append("engine: non-JSON envelope should yield nil")
+        }
+
+        // LayoutCache round-trip + LayoutResolver gate (async), in a throwaway temp dir.
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("LeadDashboardSelfTest", isDirectory: true)
         LayoutCache.clear(in: tmp)
-        var genCount = 0
-        let gen: (DataProfile) -> LayoutPlan = { _ in genCount += 1; return DefaultLayout.plan }
-        // Miss (empty cache) → generates + saves.
-        _ = LayoutResolver.resolvePlan(profile: p1, force: false, cacheDir: tmp, generate: gen)
-        if genCount != 1 { problems.append("resolver: first call should generate (genCount=\(genCount))") }
-        // Hit (same profile) → reuse, no generate.
-        _ = LayoutResolver.resolvePlan(profile: p1, force: false, cacheDir: tmp, generate: gen)
-        if genCount != 1 { problems.append("resolver: unchanged profile should reuse cache (genCount=\(genCount))") }
-        // Force → regenerate despite a hit.
-        _ = LayoutResolver.resolvePlan(profile: p1, force: true, cacheDir: tmp, generate: gen)
-        if genCount != 2 { problems.append("resolver: force should bypass cache (genCount=\(genCount))") }
-        // Changed profile → regenerate.
-        _ = LayoutResolver.resolvePlan(profile: p2, force: false, cacheDir: tmp, generate: gen)
-        if genCount != 3 { problems.append("resolver: changed profile should regenerate (genCount=\(genCount))") }
-        // Cache persists the changed key.
+        let counter = Counter()
+        let gen: (DataProfile) async -> LayoutPlan? = { _ in counter.bump(); return DefaultLayout.plan }
+        func resolve(_ p: DataProfile, force: Bool) {
+            _ = runSync { await LayoutResolver.resolvePlan(profile: p, force: force, cacheDir: tmp, generate: gen) }
+        }
+        resolve(p1, force: false)   // miss → generate
+        if counter.value != 1 { problems.append("resolver: first call should generate (n=\(counter.value))") }
+        resolve(p1, force: false)   // hit → reuse
+        if counter.value != 1 { problems.append("resolver: unchanged profile should reuse cache (n=\(counter.value))") }
+        resolve(p1, force: true)    // force → regenerate
+        if counter.value != 2 { problems.append("resolver: force should bypass cache (n=\(counter.value))") }
+        resolve(p2, force: false)   // changed → regenerate
+        if counter.value != 3 { problems.append("resolver: changed profile should regenerate (n=\(counter.value))") }
         if LayoutCache.load(from: tmp)?.key != p2.key { problems.append("cache: did not persist the latest key") }
         LayoutCache.clear(in: tmp)
 
@@ -232,4 +264,24 @@ enum SelfTest {
         let yOverlap = a.y < b.y + b.h && b.y < a.y + a.h
         return xOverlap && yOverlap
     }
+
+    /// Run an async operation to completion from the synchronous selftest (the resolver
+    /// is async now). The body runs off the main thread, so blocking here is safe.
+    private static func runSync<T>(_ body: @escaping () async -> T) -> T {
+        let sem = DispatchSemaphore(value: 0)
+        let box = ResultBox<T>()
+        Task { box.value = await body(); sem.signal() }
+        sem.wait()
+        return box.value!
+    }
+
+    private final class ResultBox<T>: @unchecked Sendable { var value: T? }
+}
+
+/// A tiny thread-safe call counter for the resolver gate test.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func bump() { lock.lock(); n += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
 }

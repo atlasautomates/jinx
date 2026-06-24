@@ -41,10 +41,11 @@ final class DashboardViewModel {
             let fetched = try await leads
             let count = try await total
 
-            // If-changed gate: reuse the cached plan unless the data profile changed.
+            // If-changed gate: reuse the cached plan unless the data profile changed;
+            // on a miss, generate via Haiku (validated + fail-closed in the resolver).
             let profile = DataProfile.from(leads: fetched, totalCount: count)
-            let plan = LayoutResolver.resolvePlan(profile: profile, force: force) { _ in
-                DefaultLayout.plan   // step C: replace with the Haiku LayoutEngine call
+            let plan = await LayoutResolver.resolvePlan(profile: profile, force: force) { p in
+                await LayoutEngine.generatePlan(profile: p)
             }
             state = .loaded(DashboardBuilder.compose(fetched: fetched, totalCount: count, plan: plan))
         } catch {
