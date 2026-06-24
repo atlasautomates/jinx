@@ -10,7 +10,7 @@ enum DashboardBuilder {
     /// The data series `widgetData` produces — the ONLY binds a plan may reference.
     /// Single source of truth for prompt generation (step C) and bind validation.
     /// Must stay in sync with the keys returned by `widgets(leads:totalCount:)`.
-    static let availableBinds: Set<String> = ["total-leads", "by-source", "added-weekly", "recent-leads"]
+    static let availableBinds: Set<String> = ["total-leads", "by-source", "by-industry", "added-weekly", "recent-leads"]
 
     /// Compose a dashboard from a (possibly cached or LLM-generated) plan + the leads.
     /// `fetched` = the recent-leads window pulled; `totalCount` = exact table total.
@@ -41,6 +41,7 @@ enum DashboardBuilder {
         return [
             "total-leads": totalLeadsKPI(totalCount),
             "by-source": bySourceBoard(leads, titleSuffix: scope),
+            "by-industry": byIndustryBoard(leads, titleSuffix: scope),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope),
             "recent-leads": recentLeadsTable(leads),
         ]
@@ -58,22 +59,38 @@ enum DashboardBuilder {
         ))
     }
 
-    /// Counts by `lead_source`, largest first. Status color cycles for visual variety.
     private static func bySourceBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
+        categoricalBoard(leads, title: "Leads by Source", titleSuffix: titleSuffix) { $0.leadSource }
+    }
+
+    private static func byIndustryBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
+        categoricalBoard(leads, title: "Leads by Industry", titleSuffix: titleSuffix) { $0.industry }
+    }
+
+    /// Counts grouped by a categorical field, largest first, capped at `topN` with the
+    /// tail aggregated into "Other" (industry can have many values). Color cycles.
+    private static func categoricalBoard(
+        _ leads: [LeadRow],
+        title: String,
+        titleSuffix: String,
+        topN: Int = 5,   // = palette size, so the named groups get distinct colors ("Other" is neutral)
+        value: (LeadRow) -> String?
+    ) -> WidgetData {
         var counts: [String: Int] = [:]
         for lead in leads {
-            let key = lead.leadSource?.trimmingCharacters(in: .whitespaces).nilIfEmpty ?? "Unknown"
+            let key = value(lead)?.nilIfEmpty ?? "Unknown"
             counts[key, default: 0] += 1
         }
+        let sorted = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         let palette = ["green", "blue", "purple", "orange", "red"]
-        let groups = counts
-            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            .enumerated()
-            .map { index, pair in
-                StatusGroup(label: pair.key, count: pair.value,
-                            status: palette[index % palette.count])
-            }
-        return .statusBoard(StatusBoardData(title: "Leads by Source" + titleSuffix, groups: groups))
+        var groups = sorted.prefix(topN).enumerated().map { index, pair in
+            StatusGroup(label: pair.key, count: pair.value, status: palette[index % palette.count])
+        }
+        if sorted.count > topN {
+            let other = sorted.dropFirst(topN).reduce(0) { $0 + $1.value }
+            groups.append(StatusGroup(label: "Other", count: other, status: "neutral"))
+        }
+        return .statusBoard(StatusBoardData(title: title + titleSuffix, groups: groups))
     }
 
     /// Leads added per ISO week, last 8 weeks present in the data.

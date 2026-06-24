@@ -17,6 +17,7 @@ enum LayoutPrompt {
     Allowed "bind" (the data series; use each at most once):
       - "total-leads"  → a single headline count (use type "kpi")
       - "by-source"    → counts grouped by lead source (use type "status-board")
+      - "by-industry"  → counts grouped by industry (use type "status-board")
       - "added-weekly" → leads added per week, a time series (use type "chart")
       - "recent-leads" → a table of the most recent leads (use type "table")
     Allowed "size": "small", "medium", "large", "full" (width emphasis).
@@ -26,11 +27,12 @@ enum LayoutPrompt {
     - Use ONLY the binds listed above; never invent a bind. Each bind at most once.
     - Pair each bind with its natural type as noted above.
     - Always include "total-leads" and "recent-leads".
-    - Include "by-source" and "added-weekly" when their profile strength is "medium" or \
-    "high"; you may drop one whose strength is "none" or "low" (sparse data).
+    - For "by-source", "by-industry", and "added-weekly": include a series when its profile \
+    strength is "medium" or "high"; drop one whose strength is "none" or "low" (sparse data). \
+    Prefer the stronger of "by-source" / "by-industry" if both are strong and space is tight.
     - Pick sizes sensibly: a KPI is "small"; the recent-leads table is "full"; a board or \
     chart is "medium" or "large".
-    - 2 to 4 widgets total.
+    - 2 to 5 widgets total.
 
     Example — profile {"total-leads":"high","by-source":"high","added-weekly":"high",\
     "recent-leads":"high","by-industry":"high","location":"high"} →
