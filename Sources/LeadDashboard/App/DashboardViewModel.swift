@@ -36,18 +36,26 @@ final class DashboardViewModel {
             // Independent reads run concurrently (halves cold-load latency); a throw on
             // either fails the whole load, keeping the dashboard coherent (never half-built).
             // Total is exact (whole table); the window feeds the breakdown widgets.
+            // Essential reads (throw → fail the load) + supplementary tier/sentiment
+            // reads (fail-open to [:], so a missing RLS policy never fails the dashboard).
             async let total = repo.totalCount()
             async let leads = repo.recentLeads()
-            let fetched = try await leads
-            let count = try await total
+            async let tiers = repo.tierCounts()
+            async let sentiment = repo.sentimentCounts()
+            let inputs = DashboardInputs(
+                leads: try await leads,
+                totalCount: try await total,
+                tierCounts: await tiers,
+                sentimentCounts: await sentiment
+            )
 
             // If-changed gate: reuse the cached plan unless the data profile changed;
             // on a miss, generate via Haiku (validated + fail-closed in the resolver).
-            let profile = DataProfile.from(leads: fetched, totalCount: count)
+            let profile = DataProfile.from(inputs)
             let plan = await LayoutResolver.resolvePlan(profile: profile, force: force) { p in
                 await LayoutEngine.generatePlan(profile: p)
             }
-            state = .loaded(DashboardBuilder.compose(fetched: fetched, totalCount: count, plan: plan))
+            state = .loaded(DashboardBuilder.compose(inputs, plan: plan))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if let previous {

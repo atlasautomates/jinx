@@ -21,18 +21,22 @@ struct DataProfile: Equatable {
             .joined(separator: "|")
     }
 
-    static func from(leads: [LeadRow], totalCount: Int) -> DataProfile {
+    static func from(_ inputs: DashboardInputs) -> DataProfile {
+        let leads = inputs.leads
         var s: [String: Strength] = [:]
-        // total-leads uses the exact whole-table count; every other signal is computed
-        // over the fetched window (recentLeads, capped at 1000) — same window/total split
-        // as DashboardBuilder. Past 1000 rows the windowed signals saturate, so magnitude
+        // total-leads uses the exact whole-table count; every other leads signal is over
+        // the fetched window (recentLeads, capped at 1000) — same window/total split as
+        // DashboardBuilder. Past 1000 rows the windowed signals saturate, so magnitude
         // becomes the main key driver; fine for the coarse gate.
-        s["total-leads"]  = magnitude(totalCount)
-        s["by-source"]    = distinctness(leads.compactMap { $0.leadSource?.nilIfEmpty })
-        s["by-industry"]  = distinctness(leads.compactMap { $0.industry?.nilIfEmpty })
-        s["added-weekly"] = weekSpan(leads)
-        s["recent-leads"] = leads.isEmpty ? Strength.none : Strength.high
-        s["location"]     = coverage(leads, present: hasLocation)
+        s["total-leads"]   = magnitude(inputs.totalCount)
+        s["by-source"]     = distinctness(leads.compactMap { $0.leadSource?.nilIfEmpty })
+        s["by-industry"]   = distinctness(leads.compactMap { $0.industry?.nilIfEmpty })
+        s["added-weekly"]  = weekSpan(leads)
+        s["recent-leads"]  = leads.isEmpty ? Strength.none : Strength.high
+        s["location"]      = coverage(leads, present: hasLocation)
+        // Supplementary tables (empty if no data / no RLS → strength none → not bound).
+        s["by-tier"]       = distinctness(Array(inputs.tierCounts.keys))
+        s["sentiment-mix"] = distinctness(Array(inputs.sentimentCounts.keys))
         return DataProfile(signals: s)
     }
 

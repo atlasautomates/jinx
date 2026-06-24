@@ -12,9 +12,17 @@ enum SupabaseCheck {
         Task {
             do {
                 let client = try SupabaseClient.make()
-                let sampled = try await LeadsRepository(client: client).ping()
+                let repo = LeadsRepository(client: client)
+                let sampled = try await repo.ping()
+                // Supplementary M3b reads (fail-open) — report whether RLS lets them through.
+                let tiers = await repo.tierCounts()
+                let sentiment = await repo.sentimentCounts()
                 ok = true
-                message = "reached \(client.baseURL.host ?? "supabase"), \(sampled) row(s) sampled"
+                let tierStr = tiers.isEmpty ? "by-tier: EMPTY (no rows / no RLS policy)"
+                    : "by-tier: \(tiers.values.reduce(0, +)) rows, \(tiers.count) tiers \(tiers.keys.sorted())"
+                let sentStr = sentiment.isEmpty ? "sentiment: EMPTY (no rows / no RLS policy)"
+                    : "sentiment: \(sentiment.values.reduce(0, +)) rows \(sentiment.keys.sorted())"
+                message = "reached \(client.baseURL.host ?? "supabase"), \(sampled) lead(s) sampled\n  \(tierStr)\n  \(sentStr)"
             } catch {
                 message = error.localizedDescription
             }

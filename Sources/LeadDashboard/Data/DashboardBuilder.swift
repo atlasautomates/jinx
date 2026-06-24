@@ -9,39 +9,40 @@ enum DashboardBuilder {
 
     /// The data series `widgetData` produces — the ONLY binds a plan may reference.
     /// Single source of truth for prompt generation (step C) and bind validation.
-    /// Must stay in sync with the keys returned by `widgets(leads:totalCount:)`.
-    static let availableBinds: Set<String> = ["total-leads", "by-source", "by-industry", "added-weekly", "recent-leads"]
+    /// Must stay in sync with the keys returned by `widgetData(_:)`.
+    static let availableBinds: Set<String> = [
+        "total-leads", "by-source", "by-industry", "by-tier", "sentiment-mix",
+        "added-weekly", "recent-leads",
+    ]
 
-    /// Compose a dashboard from a (possibly cached or LLM-generated) plan + the leads.
-    /// `fetched` = the recent-leads window pulled; `totalCount` = exact table total.
-    static func compose(fetched leads: [LeadRow], totalCount: Int, plan: LayoutPlan) -> Dashboard {
-        Dashboard(layout: Packer.pack(plan),
-                  widgets: widgetData(fetched: leads, totalCount: totalCount))
+    /// Compose a dashboard from a (cached or LLM-generated) plan + the fetched inputs.
+    static func compose(_ inputs: DashboardInputs, plan: LayoutPlan) -> Dashboard {
+        Dashboard(layout: Packer.pack(plan), widgets: widgetData(inputs))
     }
 
     /// Convenience: compose with the deterministic default plan (no LLM). Used by the
     /// selftest's data assertions and as a plain fallback.
-    static func build(fetched leads: [LeadRow], totalCount: Int) -> Dashboard {
-        compose(fetched: leads, totalCount: totalCount, plan: DefaultLayout.plan)
+    static func build(_ inputs: DashboardInputs) -> Dashboard {
+        compose(inputs, plan: DefaultLayout.plan)
     }
 
     // MARK: - Widget data
 
-    /// The per-widget data keyed by bind id — the part that always comes from leads.
-    static func widgetData(fetched leads: [LeadRow], totalCount: Int) -> [String: WidgetData] {
-        widgets(leads: leads, totalCount: totalCount)
-    }
-
-    private static func widgets(leads: [LeadRow], totalCount: Int) -> [String: WidgetData] {
-        // The breakdown widgets are computed over the fetched window; when that window
-        // is smaller than the true total, say so in the title so the source/week
-        // figures aren't misread as table-wide (the KPI alone is whole-table exact).
-        let windowed = totalCount > leads.count
-        let scope = windowed ? " (latest \(leads.count) of \(totalCount))" : ""
+    /// The per-widget data keyed by bind id. Tier/sentiment come from supplementary
+    /// tables — empty (no data / no RLS) renders an empty board, but the profile gives
+    /// them strength "none" so the LLM won't bind them.
+    static func widgetData(_ inputs: DashboardInputs) -> [String: WidgetData] {
+        let leads = inputs.leads
+        // The leads breakdowns are computed over the fetched window; when that window is
+        // smaller than the true total, say so in the title (the KPI alone is exact).
+        let windowed = inputs.totalCount > leads.count
+        let scope = windowed ? " (latest \(leads.count) of \(inputs.totalCount))" : ""
         return [
-            "total-leads": totalLeadsKPI(totalCount),
+            "total-leads": totalLeadsKPI(inputs.totalCount),
             "by-source": bySourceBoard(leads, titleSuffix: scope),
             "by-industry": byIndustryBoard(leads, titleSuffix: scope),
+            "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
+            "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope),
             "recent-leads": recentLeadsTable(leads),
         ]
@@ -67,13 +68,12 @@ enum DashboardBuilder {
         categoricalBoard(leads, title: "Leads by Industry", titleSuffix: titleSuffix) { $0.industry }
     }
 
-    /// Counts grouped by a categorical field, largest first, capped at `topN` with the
-    /// tail aggregated into "Other" (industry can have many values). Color cycles.
+    /// Counts grouped by a categorical lead field → a status board (via `board`).
     private static func categoricalBoard(
         _ leads: [LeadRow],
         title: String,
         titleSuffix: String,
-        topN: Int = 5,   // = palette size, so the named groups get distinct colors ("Other" is neutral)
+        topN: Int = 5,
         value: (LeadRow) -> String?
     ) -> WidgetData {
         var counts: [String: Int] = [:]
@@ -81,6 +81,18 @@ enum DashboardBuilder {
             let key = value(lead)?.nilIfEmpty ?? "Unknown"
             counts[key, default: 0] += 1
         }
+        return board(title: title, titleSuffix: titleSuffix, counts: counts, topN: topN)
+    }
+
+    /// Build a status board from a pre-counted `[label: count]`: largest first, capped at
+    /// `topN` (= palette size, so named groups get distinct colors) with the tail
+    /// aggregated into a neutral "Other". Shared by source/industry/tier/sentiment.
+    private static func board(
+        title: String,
+        titleSuffix: String,
+        counts: [String: Int],
+        topN: Int = 5
+    ) -> WidgetData {
         let sorted = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         let palette = ["green", "blue", "purple", "orange", "red"]
         var groups = sorted.prefix(topN).enumerated().map { index, pair in

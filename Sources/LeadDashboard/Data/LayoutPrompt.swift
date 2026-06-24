@@ -15,11 +15,13 @@ enum LayoutPrompt {
 
     Allowed "type": "kpi", "chart", "table", "status-board".
     Allowed "bind" (the data series; use each at most once):
-      - "total-leads"  → a single headline count (use type "kpi")
-      - "by-source"    → counts grouped by lead source (use type "status-board")
-      - "by-industry"  → counts grouped by industry (use type "status-board")
-      - "added-weekly" → leads added per week, a time series (use type "chart")
-      - "recent-leads" → a table of the most recent leads (use type "table")
+      - "total-leads"   → a single headline count (use type "kpi")
+      - "by-source"     → counts grouped by lead source (use type "status-board")
+      - "by-industry"   → counts grouped by industry (use type "status-board")
+      - "by-tier"       → counts grouped by lead tier (use type "status-board")
+      - "sentiment-mix" → counts of reply sentiment (use type "status-board")
+      - "added-weekly"  → leads added per week, a time series (use type "chart")
+      - "recent-leads"  → a table of the most recent leads (use type "table")
     Allowed "size": "small", "medium", "large", "full" (width emphasis).
     "priority" is an integer; lower places earlier (top-left).
 
@@ -27,9 +29,10 @@ enum LayoutPrompt {
     - Use ONLY the binds listed above; never invent a bind. Each bind at most once.
     - Pair each bind with its natural type as noted above.
     - Always include "total-leads" and "recent-leads".
-    - For "by-source", "by-industry", and "added-weekly": include a series when its profile \
-    strength is "medium" or "high"; drop one whose strength is "none" or "low" (sparse data). \
-    Prefer the stronger of "by-source" / "by-industry" if both are strong and space is tight.
+    - For "by-source", "by-industry", "by-tier", "sentiment-mix", and "added-weekly": include \
+    a series when its profile strength is "medium" or "high"; drop one whose strength is \
+    "none" or "low" (sparse/absent data). Don't crowd the board with every status board — \
+    pick the 1-3 strongest breakdowns.
     - Pick sizes sensibly: a KPI is "small"; the recent-leads table is "full"; a board or \
     chart is "medium" or "large".
     - 2 to 5 widgets total.

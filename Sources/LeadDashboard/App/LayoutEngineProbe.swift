@@ -9,6 +9,7 @@ enum LayoutEngineProbe {
         let sample = DataProfile(signals: [
             "total-leads": .high, "by-source": .high, "added-weekly": .high,
             "recent-leads": .high, "by-industry": .high, "location": .high,
+            "by-tier": .high, "sentiment-mix": .low,
         ])
 
         let semaphore = DispatchSemaphore(value: 0)

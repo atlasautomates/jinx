@@ -54,7 +54,7 @@ enum SelfTest {
             LeadRow(id: "3", companyName: "Initech", firstName: "C", industry: "Tech",
                     leadSource: "gmaps-leads", city: nil, state: nil, createdAt: nil),
         ]
-        let built = DashboardBuilder.build(fetched: sampleLeads, totalCount: 720)
+        let built = DashboardBuilder.build(DashboardInputs(leads: sampleLeads, totalCount: 720))
         if Set(built.layout.widgets.map { $0.id }) != ["total-leads", "by-source", "added-weekly", "recent-leads"] {
             problems.append("builder: unexpected widget ids")
         }
@@ -83,7 +83,7 @@ enum SelfTest {
             LeadRow(id: "g2", companyName: "Y", firstName: nil, industry: nil,
                     leadSource: "a", city: nil, state: nil, createdAt: "2026-05-25T00:00:00+00:00"),
         ]
-        let gapBuilt = DashboardBuilder.build(fetched: gapLeads, totalCount: 2)
+        let gapBuilt = DashboardBuilder.build(DashboardInputs(leads: gapLeads, totalCount: 2))
         if case .chart(let chart)? = gapBuilt.widgets["added-weekly"] {
             let zeros = chart.points.filter { $0.y == 0 }.count
             if chart.points.count != 4 || zeros != 2 {
@@ -122,15 +122,15 @@ enum SelfTest {
             LeadRow(id: "2", companyName: "B", firstName: nil, industry: "Biotech",
                     leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T00:00:00+00:00"),
         ]
-        let p1 = DataProfile.from(leads: leadsA, totalCount: 300)
-        let p1again = DataProfile.from(leads: leadsA, totalCount: 300)
+        let p1 = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 300))
+        let p1again = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 300))
         if p1.key != p1again.key { problems.append("profile: key not deterministic") }
         if p1.key.isEmpty { problems.append("profile: key is empty") }
         // Adding one lead (still same buckets) must NOT change the key.
-        let p1plus = DataProfile.from(leads: leadsA, totalCount: 301)
+        let p1plus = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 301))
         if p1.key != p1plus.key { problems.append("profile: key over-sensitive to a tiny change") }
         // Crossing a magnitude bucket (300→5000) MUST change the key.
-        let p2 = DataProfile.from(leads: leadsA, totalCount: 5000)
+        let p2 = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 5000))
         if p1.key == p2.key { problems.append("profile: key didn't shift across a magnitude bucket") }
         // A non-magnitude signal must also move the key: 4 distinct sources (by-source
         // high) vs leadsA's 2 (medium), same total.
@@ -138,14 +138,45 @@ enum SelfTest {
             LeadRow(id: "s\(i)", companyName: "C", firstName: nil, industry: "X",
                     leadSource: "src-\(i)", city: nil, state: nil, createdAt: nil)
         }
-        if DataProfile.from(leads: leads4src, totalCount: 300).key == p1.key {
+        if DataProfile.from(DashboardInputs(leads: leads4src, totalCount: 300)).key == p1.key {
             problems.append("profile: a non-magnitude (by-source) shift didn't change the key")
         }
 
         // availableBinds must match exactly what widgetData produces (drift guard).
-        let dataKeys = Set(DashboardBuilder.widgetData(fetched: sampleLeads, totalCount: 720).keys)
+        let dataKeys = Set(DashboardBuilder.widgetData(DashboardInputs(leads: sampleLeads, totalCount: 720)).keys)
         if dataKeys != DashboardBuilder.availableBinds {
             problems.append("builder: availableBinds \(DashboardBuilder.availableBinds) != widgetData keys \(dataKeys)")
+        }
+        // Every bind must appear in the Haiku prompt catalog, or the LLM is never told
+        // it exists (a silent capability loss with no other failing test).
+        for bind in DashboardBuilder.availableBinds where !LayoutPrompt.systemPrompt.contains("\"\(bind)\"") {
+            problems.append("prompt: bind '\(bind)' is missing from the LayoutPrompt catalog")
+        }
+
+        // M3b: tier/sentiment boards from supplementary counts (DashboardInputs).
+        let m3bInputs = DashboardInputs(
+            leads: sampleLeads, totalCount: 720,
+            tierCounts: ["A": 50, "B": 30, "C": 20],
+            sentimentCounts: ["positive": 12, "neutral": 5, "negative": 3]
+        )
+        let m3bData = DashboardBuilder.widgetData(m3bInputs)
+        if case .statusBoard(let tier)? = m3bData["by-tier"] {
+            if tier.groups.reduce(0, { $0 + $1.count }) != 100 { problems.append("m3b: tier counts != 100") }
+        } else { problems.append("m3b: by-tier is not a status board") }
+        if case .statusBoard(let sent)? = m3bData["sentiment-mix"] {
+            if sent.groups.first?.label != "positive" { problems.append("m3b: sentiment not sorted (top should be positive)") }
+        } else { problems.append("m3b: sentiment-mix is not a status board") }
+        // Empty supplementary tables → empty boards + strength "none" → not bound.
+        let emptyInputs = DashboardInputs(leads: sampleLeads, totalCount: 720)
+        if case .statusBoard(let tier)? = DashboardBuilder.widgetData(emptyInputs)["by-tier"],
+           !tier.groups.isEmpty { problems.append("m3b: empty tierCounts should yield an empty board") }
+        let prof = DataProfile.from(emptyInputs)
+        if prof.signals["by-tier"] != DataProfile.Strength.none
+            || prof.signals["sentiment-mix"] != DataProfile.Strength.none {
+            problems.append("m3b: absent tier/sentiment should profile as 'none'")
+        }
+        if DataProfile.from(m3bInputs).signals["by-tier"] == DataProfile.Strength.none {
+            problems.append("m3b: present tier data should profile above 'none'")
         }
 
         // sanitize (step C bind-validation): valid plan passes; nil/empty/unknown-bind → default.
