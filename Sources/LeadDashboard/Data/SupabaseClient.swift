@@ -11,9 +11,14 @@ struct SupabaseClient {
         var errorDescription: String? {
             switch self {
             case .missingKey:
+                // -T/-U grants the installed app trust on the item at creation, so a
+                // headless App Intent (Siri/Shortcuts/Aris) can read it without an
+                // "allow access" prompt. Otherwise open the app once and click
+                // "Always Allow" before using voice.
                 return "No Supabase API key in the Keychain. Store it with:\n"
                     + "  security add-generic-password -s \(SupabaseConfig.keychainService)"
                     + " -a \(SupabaseConfig.keychainAccount) -w <YOUR_KEY>"
+                    + " -T /Applications/LeadDashboard.app -U"
             case .http(let status, let body):
                 // Raw PostgREST body (column/constraint detail) only in debug builds.
                 #if DEBUG
