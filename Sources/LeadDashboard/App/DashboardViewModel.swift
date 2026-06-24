@@ -13,7 +13,13 @@ final class DashboardViewModel {
 
     /// Fetch + rebuild. Keeps the last good value on screen during a refresh, and
     /// degrades to `.stale` (data + reason) rather than `.failed` if one was present.
-    func load() async {
+    ///
+    /// The LAYOUT goes through the if-changed gate: open / refresh / hourly all call
+    /// this with `force: false`, so the layout only regenerates when the data profile
+    /// shifts (data still re-fetches every call). `force: true` (the Re-layout button,
+    /// step C) bypasses the gate. In step B the generator is the deterministic default
+    /// plan; step C swaps in the Haiku call.
+    func load(force: Bool = false) async {
         // In-flight guard: overlapping loads (double-click, retry during a slow fetch)
         // would race on `state` and could clobber fresh data with an older response.
         // Race-free because the VM is @MainActor.
@@ -32,7 +38,15 @@ final class DashboardViewModel {
             // Total is exact (whole table); the window feeds the breakdown widgets.
             async let total = repo.totalCount()
             async let leads = repo.recentLeads()
-            state = .loaded(DashboardBuilder.build(fetched: try await leads, totalCount: try await total))
+            let fetched = try await leads
+            let count = try await total
+
+            // If-changed gate: reuse the cached plan unless the data profile changed.
+            let profile = DataProfile.from(leads: fetched, totalCount: count)
+            let plan = LayoutResolver.resolvePlan(profile: profile, force: force) { _ in
+                DefaultLayout.plan   // step C: replace with the Haiku LayoutEngine call
+            }
+            state = .loaded(DashboardBuilder.compose(fetched: fetched, totalCount: count, plan: plan))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if let previous {

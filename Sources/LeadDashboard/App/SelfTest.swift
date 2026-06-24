@@ -114,6 +114,55 @@ enum SelfTest {
             problems.append("packer: full-size widget should span all 12 lg cols, got \(r.w)")
         }
 
+        // DataProfile (M2 step B): key is deterministic, stable to small changes,
+        // and shifts when the data character changes.
+        let leadsA: [LeadRow] = [
+            LeadRow(id: "1", companyName: "A", firstName: nil, industry: "Auto",
+                    leadSource: "gmaps-leads", city: "Tampa", state: "FL", createdAt: "2026-06-10T00:00:00+00:00"),
+            LeadRow(id: "2", companyName: "B", firstName: nil, industry: "Biotech",
+                    leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T00:00:00+00:00"),
+        ]
+        let p1 = DataProfile.from(leads: leadsA, totalCount: 300)
+        let p1again = DataProfile.from(leads: leadsA, totalCount: 300)
+        if p1.key != p1again.key { problems.append("profile: key not deterministic") }
+        if p1.key.isEmpty { problems.append("profile: key is empty") }
+        // Adding one lead (still same buckets) must NOT change the key.
+        let p1plus = DataProfile.from(leads: leadsA, totalCount: 301)
+        if p1.key != p1plus.key { problems.append("profile: key over-sensitive to a tiny change") }
+        // Crossing a magnitude bucket (300→5000) MUST change the key.
+        let p2 = DataProfile.from(leads: leadsA, totalCount: 5000)
+        if p1.key == p2.key { problems.append("profile: key didn't shift across a magnitude bucket") }
+        // A non-magnitude signal must also move the key: 4 distinct sources (by-source
+        // high) vs leadsA's 2 (medium), same total.
+        let leads4src = (0..<4).map { i in
+            LeadRow(id: "s\(i)", companyName: "C", firstName: nil, industry: "X",
+                    leadSource: "src-\(i)", city: nil, state: nil, createdAt: nil)
+        }
+        if DataProfile.from(leads: leads4src, totalCount: 300).key == p1.key {
+            problems.append("profile: a non-magnitude (by-source) shift didn't change the key")
+        }
+
+        // LayoutCache round-trip + LayoutResolver gate, in a throwaway temp dir.
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("LeadDashboardSelfTest", isDirectory: true)
+        LayoutCache.clear(in: tmp)
+        var genCount = 0
+        let gen: (DataProfile) -> LayoutPlan = { _ in genCount += 1; return DefaultLayout.plan }
+        // Miss (empty cache) → generates + saves.
+        _ = LayoutResolver.resolvePlan(profile: p1, force: false, cacheDir: tmp, generate: gen)
+        if genCount != 1 { problems.append("resolver: first call should generate (genCount=\(genCount))") }
+        // Hit (same profile) → reuse, no generate.
+        _ = LayoutResolver.resolvePlan(profile: p1, force: false, cacheDir: tmp, generate: gen)
+        if genCount != 1 { problems.append("resolver: unchanged profile should reuse cache (genCount=\(genCount))") }
+        // Force → regenerate despite a hit.
+        _ = LayoutResolver.resolvePlan(profile: p1, force: true, cacheDir: tmp, generate: gen)
+        if genCount != 2 { problems.append("resolver: force should bypass cache (genCount=\(genCount))") }
+        // Changed profile → regenerate.
+        _ = LayoutResolver.resolvePlan(profile: p2, force: false, cacheDir: tmp, generate: gen)
+        if genCount != 3 { problems.append("resolver: changed profile should regenerate (genCount=\(genCount))") }
+        // Cache persists the changed key.
+        if LayoutCache.load(from: tmp)?.key != p2.key { problems.append("cache: did not persist the latest key") }
+        LayoutCache.clear(in: tmp)
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")

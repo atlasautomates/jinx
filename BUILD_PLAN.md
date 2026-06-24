@@ -206,18 +206,37 @@ from enums), and it is structurally impossible for it to emit a broken grid.
 3. **Few-shot examples** (2–3) of profile → plan in the skill.
 4. **Single-shot, no tools** (`--max-turns 1`) — nothing to wander into.
 5. **Validate + ONE repair retry** — decode the plan against the enums; on failure,
-   re-prompt once with the parse error; if it still fails → **fail-closed to the
-   deterministic default layout** (the fixed M1 layout in `DashboardBuilder`). Caps
-   cost at ≤2 calls and never blanks.
+   re-prompt once with the parse error; if it still fails → **fail-closed to
+   `DefaultLayout.plan`**. Caps cost at ≤2 calls and never blanks.
 6. **Determinism** — low effort; the constrained schema leaves little to vary.
+
+**⛔ Step-C MANDATORY guards (from the step-B review — do not skip):**
+- **Validate binds before caching.** A plan may only be saved if every `bind` is in the
+  known data-series set AND `widgets` is non-empty; otherwise use `DefaultLayout.plan`
+  and DON'T save. Do this *inside* `LayoutResolver` before `LayoutCache.save`, or a
+  hallucinated bind gets persisted and replayed every launch (cache poisoning — reliability
+  rated this HIGH the moment the LLM lands). Renderer already drops data-less widgets, but
+  enforce it at the gate, not just visually.
+- **Generation never throws.** The `claude -p` wrapper must catch timeout / non-zero exit /
+  empty / fence-wrapped / non-JSON output (per `learnings.md` JSON-fence handling) and
+  return `DefaultLayout.plan` — never throw into `load()`'s catch (would degrade to
+  `.failed`/`.stale`), never save a bad plan.
+- **Resolver goes async.** `generate` is currently `(DataProfile) -> LayoutPlan` (sync);
+  the Haiku call is async → change to `async` and thread it through `load()`.
+- Add a selftest asserting a resolved plan's binds all resolve to data.
 
 ### 6.4 Cache-gating (the cost control)
 
-- **Cache key = hash(data profile + viewport bucket).** The *data profile* is a coarse
-  signal vector — for each candidate `bind`: present? how strong? (distinct-category
-  count, % non-null, row volume bucketed). This is what makes the layout *adaptive*
-  (a campaign rich in sentiment shows a sentiment widget; a sparse one doesn't) while
-  changing slowly enough to stay cheap.
+- **Cache key = the data profile only** (revised at step B — viewport dropped). The plan
+  is viewport-agnostic; `Packer` makes it responsive across lg/md/sm from one plan, so
+  there's no reason to cache per-viewport (it would just triple LLM calls). `DataProfile`
+  (`Models/DataProfile.swift`) is a coarse signal vector — for each candidate `bind`:
+  present? how strong? (distinct-category count, % non-null, row-volume bucketed, coarse
+  on purpose so the key changes slowly). Key = deterministic sorted string (NOT Swift's
+  randomized `hashValue` — that would defeat the cache across launches). This is what
+  makes the layout *adaptive* (a campaign rich in sentiment shows a sentiment widget; a
+  sparse one doesn't) while staying cheap. *(Future: reintroduce viewport in the key only
+  if we want viewport-specific widget selection.)*
 - **Every trigger — open, manual Refresh, hourly tick — recomputes the key and only
   calls Haiku if it changed** ("if-changed" gate; per user 2026-06-23 this includes
   Refresh). Cold start (no cached plan) generates once. Refresh always re-fetches data

@@ -4,7 +4,7 @@ import Foundation
 /// (which widgets, emphasis, order), never grid geometry. `Packer` deterministically
 /// expands a plan into the `LayoutSpec` the renderer consumes, so a small model
 /// cannot produce an invalid grid (overlaps / out-of-bounds are impossible).
-struct LayoutPlan: Codable {
+struct LayoutPlan: Codable, Equatable {
     let widgets: [PlannedWidget]
 }
 
@@ -17,7 +17,7 @@ enum WidgetSize: String, Codable {
     case full
 }
 
-struct PlannedWidget: Codable {
+struct PlannedWidget: Codable, Equatable {
     let type: WidgetType   // a registered renderer widget kind
     let bind: String       // a data-series id the builder can produce (becomes LayoutWidget.id)
     let size: WidgetSize

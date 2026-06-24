@@ -2,18 +2,30 @@ import Foundation
 
 /// Deterministically turns lead rows into a `Dashboard` (layout + widget data).
 ///
-/// M1 uses a FIXED layout (the LLM generates the layout in M2); only the widget
-/// *data* is derived from live leads here. Pure/synchronous and side-effect free
-/// so it's trivially testable and the UI layer stays declarative.
+/// Widget *data* is derived from live leads here; the *layout* comes from a
+/// `LayoutPlan` packed by `Packer` (M2). Pure/synchronous and side-effect free so it's
+/// trivially testable and the UI layer stays declarative.
 enum DashboardBuilder {
 
-    /// `fetched` = the recent-leads window actually pulled; `totalCount` = exact table
-    /// total (may exceed `fetched.count` if the window saturated).
+    /// Compose a dashboard from a (possibly cached or LLM-generated) plan + the leads.
+    /// `fetched` = the recent-leads window pulled; `totalCount` = exact table total.
+    static func compose(fetched leads: [LeadRow], totalCount: Int, plan: LayoutPlan) -> Dashboard {
+        Dashboard(layout: Packer.pack(plan),
+                  widgets: widgetData(fetched: leads, totalCount: totalCount))
+    }
+
+    /// Convenience: compose with the deterministic default plan (no LLM). Used by the
+    /// selftest's data assertions and as a plain fallback.
     static func build(fetched leads: [LeadRow], totalCount: Int) -> Dashboard {
-        Dashboard(layout: layout(), widgets: widgets(leads: leads, totalCount: totalCount))
+        compose(fetched: leads, totalCount: totalCount, plan: DefaultLayout.plan)
     }
 
     // MARK: - Widget data
+
+    /// The per-widget data keyed by bind id — the part that always comes from leads.
+    static func widgetData(fetched leads: [LeadRow], totalCount: Int) -> [String: WidgetData] {
+        widgets(leads: leads, totalCount: totalCount)
+    }
 
     private static func widgets(leads: [LeadRow], totalCount: Int) -> [String: WidgetData] {
         // The breakdown widgets are computed over the fetched window; when that window
@@ -123,27 +135,6 @@ enum DashboardBuilder {
             ]
         }
         return .table(TableData(title: "Recent Leads", columns: columns, rows: rows))
-    }
-
-    // MARK: - Fixed M1 layout (LLM-generated in M2)
-
-    private static func layout() -> LayoutSpec {
-        func r(_ x: Int, _ y: Int, _ w: Int, _ h: Int) -> GridRect { GridRect(x: x, y: y, w: w, h: h) }
-        return LayoutSpec(
-            breakpoints: ["lg": 1200, "md": 996, "sm": 768],
-            cols: ["lg": 12, "md": 10, "sm": 6],
-            rowHeight: 80,
-            widgets: [
-                LayoutWidget(id: "total-leads", type: .kpi,
-                             layouts: ["lg": r(0, 0, 3, 2), "md": r(0, 0, 5, 2), "sm": r(0, 0, 6, 2)]),
-                LayoutWidget(id: "by-source", type: .statusBoard,
-                             layouts: ["lg": r(3, 0, 4, 4), "md": r(5, 0, 5, 4), "sm": r(0, 2, 6, 4)]),
-                LayoutWidget(id: "added-weekly", type: .chart,
-                             layouts: ["lg": r(7, 0, 5, 4), "md": r(0, 2, 5, 4), "sm": r(0, 6, 6, 3)]),
-                LayoutWidget(id: "recent-leads", type: .table,
-                             layouts: ["lg": r(0, 4, 12, 4), "md": r(0, 6, 10, 4), "sm": r(0, 9, 6, 4)]),
-            ]
-        )
     }
 }
 
