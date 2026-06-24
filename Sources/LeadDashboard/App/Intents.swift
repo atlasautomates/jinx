@@ -59,7 +59,7 @@ struct LeadCountIntent: AppIntent {
         let repo = try await makeRepository()
         let count: Int
         do { count = try await repo.totalCount() } catch { throw LeadDashboardIntentError.fetchFailed }
-        return .result(value: count, dialog: "You have \(count) leads.")
+        return .result(value: count, dialog: IntentDialog(stringLiteral: LeadAnswers.count(count)))
     }
 }
 
@@ -104,40 +104,28 @@ struct LeadBreakdownIntent: AppIntent {
         Summary("Lead breakdown by \(\.$dimension)")
     }
 
-    /// Window for the source/industry breakdown. If a fetch returns this many rows the
-    /// tally is a recency sample (newest leads), not the whole table — the dialog says so.
-    private static let breakdownWindow = 2000
-
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let repo = try await makeRepository()
         let result: (counts: [String: Int], sampled: Bool)
         do { result = try await Self.counts(for: dimension, repo: repo) }
         catch { throw LeadDashboardIntentError.fetchFailed }
 
-        guard !result.counts.isEmpty else {
-            return .result(dialog: "No \(dimension.spokenSingular) data yet.")
-        }
-        let top = result.counts
-            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-            .prefix(3)
-        // Cap each label so a pathological scraped value can't dominate the utterance.
-        let phrase = top.map { "\($0.key.prefix(40)) with \($0.value)" }.joined(separator: ", ")
-        let qualifier = result.sampled ? " — among the \(Self.breakdownWindow) most recent leads" : ""
-        return .result(dialog: "Top \(dimension.spokenPlural): \(phrase)\(qualifier).")
+        // Shared with the --query CLI via LeadAnswers so Siri and Aris never drift.
+        let spoken = LeadAnswers.breakdown(result.counts,
+                                           singular: dimension.spokenSingular,
+                                           plural: dimension.spokenPlural,
+                                           sampled: result.sampled)
+        return .result(dialog: IntentDialog(stringLiteral: spoken))
     }
 
     private static func counts(for dim: LeadBreakdownDimension, repo: LeadsRepository) async throws -> (counts: [String: Int], sampled: Bool) {
         switch dim {
         case .tier:
             return (await repo.tierCounts(), false)
-        case .source, .industry:
-            let leads = try await repo.recentLeads(limit: breakdownWindow)
-            var c: [String: Int] = [:]
-            for lead in leads {
-                let value = (dim == .source ? lead.leadSource : lead.industry)?.nilIfEmpty ?? "Unknown"
-                c[value, default: 0] += 1
-            }
-            return (c, leads.count >= breakdownWindow)
+        case .source:
+            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.leadSource }
+        case .industry:
+            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
         }
     }
 }

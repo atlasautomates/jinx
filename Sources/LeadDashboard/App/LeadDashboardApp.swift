@@ -13,6 +13,9 @@ struct LeadDashboardApp: App {
         if CommandLine.arguments.contains("--probe-layout-engine") {
             LayoutEngineProbe.run()
         }
+        if CommandLine.arguments.contains("--query") {
+            LeadQuery.run()   // headless answer for automation / the Aris voice gate
+        }
     }
 
     var body: some Scene {

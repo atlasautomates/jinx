@@ -226,6 +226,25 @@ enum SelfTest {
         if LayoutCache.load(from: tmp)?.key != p2.key { problems.append("cache: did not persist the latest key") }
         LayoutCache.clear(in: tmp)
 
+        // LeadAnswers: the shared phrasing the Siri App Intent and the --query CLI BOTH
+        // route through. These assert the contract so the two voice surfaces can't drift.
+        if LeadAnswers.count(1102) != "You have 1102 leads." {
+            problems.append("answers: count phrasing changed")
+        }
+        if LeadAnswers.breakdown([:], singular: "source", plural: "sources") != "No source data yet." {
+            problems.append("answers: empty breakdown should use the singular noun")
+        }
+        // Top-3, count desc then key asc; the 4th group ('d') is dropped.
+        let bd = LeadAnswers.breakdown(["b": 5, "a": 5, "c": 9, "d": 1], singular: "tier", plural: "tiers")
+        if bd != "Top tiers: c with 9, a with 5, b with 5." {
+            problems.append("answers: breakdown top-3/tiebreak changed (got \(bd))")
+        }
+        // The recency-sample qualifier appears only when sampled.
+        if !LeadAnswers.breakdown(["a": 1], singular: "source", plural: "sources", sampled: true)
+            .contains("among the \(LeadAnswers.breakdownWindow) most recent leads") {
+            problems.append("answers: sampled qualifier missing")
+        }
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
