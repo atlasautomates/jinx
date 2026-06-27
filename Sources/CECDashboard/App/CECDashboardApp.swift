@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct LeadDashboardApp: App {
+struct CECDashboardApp: App {
     init() {
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.run()

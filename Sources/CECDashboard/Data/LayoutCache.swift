@@ -15,7 +15,7 @@ enum LayoutCache {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("LeadDashboard", isDirectory: true)
+        return base.appendingPathComponent("CECDashboard", isDirectory: true)
     }
 
     private static func fileURL(in dir: URL) -> URL {

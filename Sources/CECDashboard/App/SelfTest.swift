@@ -208,7 +208,7 @@ enum SelfTest {
         }
 
         // LayoutCache round-trip + LayoutResolver gate (async), in a throwaway temp dir.
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("LeadDashboardSelfTest", isDirectory: true)
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("CECDashboardSelfTest", isDirectory: true)
         LayoutCache.clear(in: tmp)
         let counter = Counter()
         let gen: (DataProfile) async -> LayoutPlan? = { _ in counter.bump(); return DefaultLayout.plan }

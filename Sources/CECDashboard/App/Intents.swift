@@ -9,13 +9,13 @@ import Foundation
 /// Auto-discovered by the App Intents framework — no wiring in the @main App needed.
 /// Requires the app to have been launched once (to grant the Keychain "Always Allow").
 
-enum LeadDashboardIntentError: Error, CustomLocalizedStringResourceConvertible {
+enum CECDashboardIntentError: Error, CustomLocalizedStringResourceConvertible {
     case notConfigured
     case fetchFailed
     var localizedStringResource: LocalizedStringResource {
         switch self {
         case .notConfigured:
-            return "Lead Dashboard isn't set up yet — open the app once to connect it."
+            return "CEC Dashboard isn't set up yet — open the app once to connect it."
         case .fetchFailed:
             return "Couldn't reach the leads database."
         }
@@ -31,7 +31,7 @@ enum LeadDashboardIntentError: Error, CustomLocalizedStringResourceConvertible {
 /// `.notConfigured` — Siri gets a clean, honest answer instead of a hang.
 private func makeRepository() async throws -> LeadsRepository {
     guard let client = await boundedClientBuild(seconds: 3) else {
-        throw LeadDashboardIntentError.notConfigured
+        throw CECDashboardIntentError.notConfigured
     }
     return LeadsRepository(client: client)
 }
@@ -58,7 +58,7 @@ struct LeadCountIntent: AppIntent {
     func perform() async throws -> some IntentResult & ReturnsValue<Int> & ProvidesDialog {
         let repo = try await makeRepository()
         let count: Int
-        do { count = try await repo.totalCount() } catch { throw LeadDashboardIntentError.fetchFailed }
+        do { count = try await repo.totalCount() } catch { throw CECDashboardIntentError.fetchFailed }
         return .result(value: count, dialog: IntentDialog(stringLiteral: LeadAnswers.count(count)))
     }
 }
@@ -108,7 +108,7 @@ struct LeadBreakdownIntent: AppIntent {
         let repo = try await makeRepository()
         let result: (counts: [String: Int], sampled: Bool)
         do { result = try await Self.counts(for: dimension, repo: repo) }
-        catch { throw LeadDashboardIntentError.fetchFailed }
+        catch { throw CECDashboardIntentError.fetchFailed }
 
         // Shared with the --query CLI via LeadAnswers so Siri and Aris never drift.
         let spoken = LeadAnswers.breakdown(result.counts,
@@ -133,8 +133,8 @@ struct LeadBreakdownIntent: AppIntent {
 // MARK: - Open the dashboard (interactive)
 
 struct OpenDashboardIntent: AppIntent {
-    static let title: LocalizedStringResource = "Open Lead Dashboard"
-    static let description = IntentDescription("Opens the Lead Dashboard window.")
+    static let title: LocalizedStringResource = "Open CEC Dashboard"
+    static let description = IntentDescription("Opens the CEC Dashboard window.")
     static let openAppWhenRun = true
 
     func perform() async throws -> some IntentResult { .result() }
@@ -142,7 +142,7 @@ struct OpenDashboardIntent: AppIntent {
 
 // MARK: - Siri / Spotlight phrases (every phrase must include the app name)
 
-struct LeadDashboardShortcuts: AppShortcutsProvider {
+struct CECDashboardShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: LeadCountIntent(),

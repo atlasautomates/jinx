@@ -70,7 +70,7 @@ private struct Toolbar: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Lead Dashboard")
+            Text("CEC Dashboard")
                 .font(.display(22, weight: .semibold))
                 .foregroundStyle(Palette.textPrimary)
 

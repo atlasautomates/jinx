@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "LeadDashboard",
+    name: "CECDashboard",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "LeadDashboard",
-            path: "Sources/LeadDashboard"
+            name: "CECDashboard",
+            path: "Sources/CECDashboard"
         )
     ]
 )

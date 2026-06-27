@@ -3,8 +3,8 @@ import Foundation
 /// Headless lead query for automation and the Aris voice gate (run with `--query <metric>`).
 /// Prints ONE spoken-friendly line to stdout and exits 0; errors go to stderr, exit 1.
 ///
-///   LeadDashboard --query count
-///   LeadDashboard --query by-tier
+///   CECDashboard --query count
+///   CECDashboard --query by-tier
 ///
 /// Why a CLI and not `shortcuts run`: auto-provided App Shortcuts (the Siri surface in
 /// `Intents.swift`) don't appear in `shortcuts list` and aren't runnable by name from the

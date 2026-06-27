@@ -18,7 +18,7 @@ struct SupabaseClient {
                 return "No Supabase API key in the Keychain. Store it with:\n"
                     + "  security add-generic-password -s \(SupabaseConfig.keychainService)"
                     + " -a \(SupabaseConfig.keychainAccount) -w <YOUR_KEY>"
-                    + " -T /Applications/LeadDashboard.app -U"
+                    + " -T /Applications/CECDashboard.app -U"
             case .http(let status, let body):
                 // Raw PostgREST body (column/constraint detail) only in debug builds.
                 #if DEBUG
