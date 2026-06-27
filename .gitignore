@@ -10,6 +10,6 @@
 *.xcodeproj/project.xcworkspace/xcuserdata/
 
 # XcodeGen-generated artifacts (reproduced by xcode/build.sh from project.yml)
-xcode/LeadDashboard.xcodeproj/
+xcode/CECDashboard.xcodeproj/
 xcode/Generated/
 xcode/build/
