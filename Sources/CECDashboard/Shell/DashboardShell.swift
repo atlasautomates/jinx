@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardShell: View {
     let dashboard: Dashboard
+    var title: String = "CEC Dashboard"
     var isRefreshing: Bool = false
     /// Non-nil when the displayed data is stale (last refresh failed); carries the reason.
     var staleMessage: String? = nil
@@ -16,7 +17,7 @@ struct DashboardShell: View {
             let bp = dashboard.layout.breakpointName(forWidth: Double(gridWidth))
 
             VStack(spacing: 0) {
-                Toolbar(breakpoint: bp, isRefreshing: isRefreshing,
+                Toolbar(title: title, breakpoint: bp, isRefreshing: isRefreshing,
                         onRefresh: onRefresh, onRelayout: onRelayout)
                     .padding(.horizontal, pad)
                     .padding(.vertical, Space.s4)
@@ -63,6 +64,7 @@ private struct StaleBanner: View {
 }
 
 private struct Toolbar: View {
+    let title: String
     let breakpoint: String
     let isRefreshing: Bool
     let onRefresh: (() -> Void)?
@@ -70,7 +72,7 @@ private struct Toolbar: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("CEC Dashboard")
+            Text(title)
                 .font(.display(22, weight: .semibold))
                 .foregroundStyle(Palette.textPrimary)
 
@@ -90,11 +92,12 @@ private struct Toolbar: View {
                     onRefresh?()
                 }
 
-                ToolbarButton(label: "Re-layout",
-                              enabled: !isRefreshing && onRelayout != nil) {
-                    onRelayout?()
+                if onRelayout != nil {
+                    ToolbarButton(label: "Re-layout", enabled: !isRefreshing) {
+                        onRelayout?()
+                    }
+                    .help("Regenerate the layout with Haiku, ignoring the cache")
                 }
-                .help("Regenerate the layout with Haiku, ignoring the cache")
             }
         }
     }
