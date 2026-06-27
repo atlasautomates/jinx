@@ -29,8 +29,11 @@ struct RootView: View {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
             if Task.isCancelled { break }
-            await model.load()
-            await campaignModel.load()
+            // Refresh both tabs concurrently — they hit independent tables and each
+            // guards its own in-flight refresh, so there's no ordering dependency.
+            async let leads: Void = model.load()
+            async let campaigns: Void = campaignModel.load()
+            _ = await (leads, campaigns)
         }
     }
 

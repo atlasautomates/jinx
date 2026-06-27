@@ -9,14 +9,12 @@ struct CampaignRow: Codable, Identifiable {
     let id: String
     let campaignName: String?
     let status: String?
-    let sendingAccount: String?
     let createdAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id
         case campaignName = "campaign_name"
         case status
-        case sendingAccount = "sending_account"
         case createdAt = "created_at"
     }
 }
@@ -91,4 +89,9 @@ struct CampaignInputs {
     let summaries: [CampaignSummary]
     /// sending_account -> count of sent emails (aggregate, from send_queue status='sent').
     let sendsByAccount: [String: Int]
+    /// True when the numbers may be INCOMPLETE: a supplementary read failed (RLS/network)
+    /// OR a windowed read hit its row cap (so counts under-report). The UI surfaces this
+    /// so a degraded/truncated load is never silently shown as authoritative. Default false
+    /// keeps existing call sites (e.g. selftest fixtures) working.
+    var partial: Bool = false
 }

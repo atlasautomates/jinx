@@ -26,12 +26,15 @@ enum CampaignBuilder {
         let active = summaries.filter { $0.status.lowercased() == "active" }.count
         let totalSent = summaries.reduce(0) { $0 + $1.totalSent }
         let totalReplies = summaries.reduce(0) { $0 + $1.totalReplies }
+        // Replies ÷ emails-sent. This is the dashboard's own definition (per-sent);
+        // distinct from campaigns_tracking.reply_rate (replies ÷ delivered), which we do
+        // NOT surface here — labeled "Replies / Sent" so the two can't be conflated.
         let replyRate = totalSent > 0 ? Double(totalReplies) / Double(totalSent) * 100.0 : 0
 
         widgets["kpi-active"] = kpi("Active Campaigns", Double(active), .number)
         widgets["kpi-sent"] = kpi("Emails Sent", Double(totalSent), .number)
         widgets["kpi-replies"] = kpi("Replies", Double(totalReplies), .number)
-        widgets["kpi-reply-rate"] = kpi("Reply Rate", replyRate, .percent)
+        widgets["kpi-reply-rate"] = kpi("Replies / Sent", replyRate, .percent)
         planned.append(PlannedWidget(type: .kpi, bind: "kpi-active", size: .small, priority: next()))
         planned.append(PlannedWidget(type: .kpi, bind: "kpi-sent", size: .small, priority: next()))
         planned.append(PlannedWidget(type: .kpi, bind: "kpi-replies", size: .small, priority: next()))
@@ -51,7 +54,7 @@ enum CampaignBuilder {
         }
 
         // ── Per-campaign metrics table (full width, last) ───────────────────────
-        widgets["campaigns-table"] = campaignsTable(summaries)
+        widgets["campaigns-table"] = campaignsTable(summaries, partial: inputs.partial)
         planned.append(PlannedWidget(type: .table, bind: "campaigns-table", size: .full, priority: next()))
 
         return Dashboard(layout: Packer.pack(LayoutPlan(widgets: planned)), widgets: widgets)
@@ -89,7 +92,7 @@ enum CampaignBuilder {
         return .statusBoard(StatusBoardData(title: "Sends by Account", groups: groups))
     }
 
-    private static func campaignsTable(_ summaries: [CampaignSummary]) -> WidgetData {
+    private static func campaignsTable(_ summaries: [CampaignSummary], partial: Bool) -> WidgetData {
         let columns = [
             TableColumn(key: "campaign", label: "Campaign", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "status", label: "Status", sortable: nil, format: nil, variant: "badge"),
@@ -109,6 +112,9 @@ enum CampaignBuilder {
                 "reply_rate": .string(rr),
             ]
         }
-        return .table(TableData(title: "Campaigns", columns: columns, rows: rows))
+        // Honest signal when a read failed or a window truncated — the numbers below may
+        // under-report, so say so rather than presenting them as authoritative.
+        let title = partial ? "Campaigns (partial data — some metrics may be incomplete)" : "Campaigns"
+        return .table(TableData(title: title, columns: columns, rows: rows))
     }
 }

@@ -245,6 +245,11 @@ enum SelfTest {
             problems.append("answers: sampled qualifier missing")
         }
 
+        // ── Campaigns tab: CampaignsRepository.compose + CampaignBuilder ────────────
+        // The compose path is pure (no I/O), so we exercise the join/binding edge cases
+        // here rather than against the live DB.
+        problems.append(contentsOf: campaignChecks())
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
@@ -253,6 +258,115 @@ enum SelfTest {
             FileHandle.standardError.write(Data("SELFTEST FAIL — \(summary)\n  - \(problems.joined(separator: "\n  - "))\n".utf8))
             exit(1)
         }
+    }
+
+    /// Exercises the campaigns data path: name-join (trim/case-fold), same-source
+    /// sent/replies binding, unnamed-campaign isolation, "Other" status rollup, the
+    /// reply-rate zero guard, and the `partial` (degraded/truncated) surface.
+    private static func campaignChecks() -> [String] {
+        var problems: [String] = []
+
+        // Empty in → empty out, not partial; the table renders with zero rows.
+        let empty = CampaignsRepository.compose(
+            campaigns: [], tracking: [], leadRows: [], sendRows: [], partial: false)
+        if !empty.summaries.isEmpty || empty.partial {
+            problems.append("campaigns: empty compose should be empty + not partial")
+        }
+        if case .table(let t)? = CampaignBuilder.build(empty).widgets["campaigns-table"], !t.rows.isEmpty {
+            problems.append("campaigns: empty build should yield a 0-row table")
+        }
+
+        // Fixture: tracking wins for matched names; roster fills the rest; two unnamed
+        // campaigns must NOT share a tracking row (and must not grab the decoy below).
+        let campaigns = [
+            CampaignRow(id: "c1", campaignName: "Alpha", status: "active", createdAt: nil),
+            CampaignRow(id: "c2", campaignName: "  Beta  ", status: "paused", createdAt: nil),  // whitespace → "beta"
+            CampaignRow(id: "c3", campaignName: nil, status: "active", createdAt: nil),         // unnamed
+            CampaignRow(id: "c4", campaignName: nil, status: "active", createdAt: nil),         // unnamed #2
+        ]
+        let tracking = [
+            CampaignTrackingRow(campaignName: "alpha", totalLeads: 120, totalSent: 100, totalReplies: 5, totalBounced: 1, bounceRate: nil),
+            CampaignTrackingRow(campaignName: "beta", totalLeads: 60, totalSent: 50, totalReplies: 0, totalBounced: 0, bounceRate: nil),
+            CampaignTrackingRow(campaignName: "untitled campaign", totalLeads: 999, totalSent: 999, totalReplies: 999, totalBounced: 0, bounceRate: nil), // decoy
+        ]
+        let leadRows = [
+            CampaignLeadRow(campaignId: "c1", status: "sent"), CampaignLeadRow(campaignId: "c1", status: "sent"),
+            CampaignLeadRow(campaignId: "c1", status: "replied"), CampaignLeadRow(campaignId: "c1", status: "pending"),
+            CampaignLeadRow(campaignId: "c3", status: "sent"), CampaignLeadRow(campaignId: "c3", status: "sent"),
+            CampaignLeadRow(campaignId: "c3", status: "sent"), CampaignLeadRow(campaignId: "c3", status: "sent"),
+            CampaignLeadRow(campaignId: "c3", status: "weirdstatus"), CampaignLeadRow(campaignId: "c3", status: "weirdstatus"),
+            CampaignLeadRow(campaignId: "c4", status: "pending"),
+        ]
+        let sendRows = [
+            SendQueueRow(campaignId: "c1", sendingAccount: "a@x.com", status: "sent"),
+            SendQueueRow(campaignId: "c1", sendingAccount: "a@x.com", status: "sent"),
+            SendQueueRow(campaignId: "c3", sendingAccount: "b@x.com", status: "sent"),
+            SendQueueRow(campaignId: "c4", sendingAccount: "a@x.com", status: "pending"),  // not 'sent' → ignored
+        ]
+        let inputs = CampaignsRepository.compose(
+            campaigns: campaigns, tracking: tracking, leadRows: leadRows, sendRows: sendRows, partial: false)
+        let byId = Dictionary(uniqueKeysWithValues: inputs.summaries.map { ($0.id, $0) })
+
+        // Matched name → tracking sent/replies (NOT roster's 2 sent / 1 reply).
+        if byId["c1"]?.totalSent != 100 || byId["c1"]?.totalReplies != 5 {
+            problems.append("campaigns: matched campaign should bind sent/replies from tracking")
+        }
+        // Whitespace name normalizes to match "beta".
+        if byId["c2"]?.totalSent != 50 {
+            problems.append("campaigns: trimmed name should join tracking ('  Beta  ' → 'beta')")
+        }
+        // Unnamed → roster fallback, and MUST NOT pick up the "untitled campaign" decoy.
+        if byId["c3"]?.totalSent != 4 {
+            problems.append("campaigns: unnamed campaign should use roster sent (4), not the decoy tracking row")
+        }
+        if byId["c4"]?.totalSent != 0 {
+            problems.append("campaigns: second unnamed campaign should not share c3/decoy numbers")
+        }
+
+        let built = CampaignBuilder.build(inputs)
+        // Aggregate KPIs: 3 active, sent 100+50+4+0 = 154.
+        if case .kpi(let k)? = built.widgets["kpi-active"], Int(k.value) != 3 {
+            problems.append("campaigns: active-campaign KPI should be 3 (got \(Int(k.value)))")
+        }
+        if case .kpi(let k)? = built.widgets["kpi-sent"], Int(k.value) != 154 {
+            problems.append("campaigns: emails-sent KPI should sum to 154 (got \(Int(k.value)))")
+        }
+        // Non-canonical statuses roll into an "Other" group on the funnel.
+        if case .statusBoard(let b)? = built.widgets["funnel-c3"] {
+            if !b.groups.contains(where: { $0.label == "Other" && $0.count == 2 }) {
+                problems.append("campaigns: non-canonical statuses should roll into 'Other' (count 2)")
+            }
+        } else {
+            problems.append("campaigns: c3 should have a funnel status board")
+        }
+        // by-account counts only delivered sends (a@x.com=2, b@x.com=1; the pending row drops).
+        if case .statusBoard(let b)? = built.widgets["by-account"] {
+            let total = b.groups.reduce(0) { $0 + $1.count }
+            if total != 3 { problems.append("campaigns: by-account should count 3 sent (got \(total))") }
+        } else {
+            problems.append("campaigns: by-account status board missing")
+        }
+        // Reply-rate zero guard: exactly one campaign (c4, sent=0) renders "—".
+        if case .table(let t)? = built.widgets["campaigns-table"] {
+            let dashes = t.rows.filter { if case .string("—")? = $0["reply_rate"] { return true }; return false }.count
+            if dashes != 1 {
+                problems.append("campaigns: exactly one zero-sent campaign should show '—' reply rate (got \(dashes))")
+            }
+            if t.title.contains("partial") {
+                problems.append("campaigns: non-partial load should not mark the table partial")
+            }
+        } else {
+            problems.append("campaigns: campaigns-table should be a table")
+        }
+
+        // partial=true surfaces in the table title (degraded/truncated honesty).
+        let degraded = CampaignsRepository.compose(
+            campaigns: campaigns, tracking: tracking, leadRows: leadRows, sendRows: sendRows, partial: true)
+        if case .table(let t)? = CampaignBuilder.build(degraded).widgets["campaigns-table"], !t.title.contains("partial") {
+            problems.append("campaigns: partial load should mark the table title 'partial'")
+        }
+
+        return problems
     }
 
     private static func kindName(_ data: WidgetData) -> String {
