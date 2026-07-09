@@ -11,6 +11,9 @@ struct LeadRow: Codable, Identifiable {
     let city: String?
     let state: String?
     let createdAt: String?
+    // Pipeline position (P5-3): scraped/campaigned/… Defaulted so the memberwise
+    // init keeps working for existing fixtures (decode still reads the column).
+    var enrichmentStage: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -21,5 +24,6 @@ struct LeadRow: Codable, Identifiable {
         case city
         case state
         case createdAt = "created_at"
+        case enrichmentStage = "enrichment_stage"
     }
 }

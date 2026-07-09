@@ -14,7 +14,7 @@ struct LeadsRepository {
     func recentLeads(limit: Int = 1000) async throws -> [LeadRow] {
         let data = try await client.get("leads", [
             URLQueryItem(name: "select",
-                         value: "id,company_name,first_name,industry,lead_source,city,state,created_at"),
+                         value: "id,company_name,first_name,industry,lead_source,city,state,created_at,enrichment_stage"),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, limit))),
         ])

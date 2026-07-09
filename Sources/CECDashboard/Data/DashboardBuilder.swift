@@ -150,6 +150,7 @@ enum DashboardBuilder {
             TableColumn(key: "company", label: "Company", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "industry", label: "Industry", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "source", label: "Source", sortable: nil, format: nil, variant: "badge"),
+            TableColumn(key: "stage", label: "Stage", sortable: nil, format: nil, variant: "badge"),
             TableColumn(key: "location", label: "Location", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "added", label: "Added", sortable: nil, format: nil, variant: nil),
         ]
@@ -164,6 +165,7 @@ enum DashboardBuilder {
                 "company": .string(lead.companyName?.nilIfEmpty ?? "Unknown"),
                 "industry": .string(lead.industry?.nilIfEmpty ?? "—"),
                 "source": .string(lead.leadSource?.nilIfEmpty ?? "—"),
+                "stage": .string(lead.enrichmentStage?.nilIfEmpty ?? "—"),
                 "location": .string(location.isEmpty ? "—" : location),
                 "added": .string(added),
             ]

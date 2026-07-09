@@ -250,6 +250,9 @@ enum SelfTest {
         // here rather than against the live DB.
         problems.append(contentsOf: campaignChecks())
 
+        // ── Pipeline tab: PipelineRepository.compose + PipelineBuilder ──────────────
+        problems.append(contentsOf: pipelineChecks())
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
@@ -440,6 +443,172 @@ enum SelfTest {
     }
 
     private final class ResultBox<T>: @unchecked Sendable { var value: T? }
+
+    /// Exercises the pipeline data path (all pure): test-vertical filtering, the
+    /// runsCap window, stage grouping/ordering, funnel/drops widgets, duration
+    /// formatting, the 7-day KPI window (injected `now`), the `partial` surface,
+    /// and JSONValue's deterministic pretty-printing (the inspector's renderer).
+    private static func pipelineChecks() -> [String] {
+        var problems: [String] = []
+
+        func run(_ id: String, vertical: String? = "toy", status: String? = "succeeded",
+                 started: String? = "2026-07-08T10:00:00+00:00",
+                 finished: String? = "2026-07-08T10:12:30+00:00") -> PipelineRunRow {
+            PipelineRunRow(runId: id, kind: "full", vertical: vertical,
+                           searchQuery: nil, status: status, error: nil, gitSha: nil,
+                           startedAt: started, finishedAt: finished)
+        }
+        func stage(_ rid: String, _ name: String, seq: Int, inN: Int?, outN: Int?,
+                   status: String = "succeeded", drops: [String: Double]? = nil) -> PipelineStageRow {
+            PipelineStageRow(id: seq, runId: rid, stage: name, seq: seq, status: status,
+                             countIn: inN, countOut: outN, drops: drops, spend: nil,
+                             error: nil, startedAt: nil, finishedAt: nil)
+        }
+
+        // Empty in → empty out, not partial.
+        let empty = PipelineRepository.compose(runs: [], stageRows: [], partial: false)
+        if !empty.runs.isEmpty || empty.partial {
+            problems.append("pipeline: empty compose should be empty + not partial")
+        }
+
+        // `__` test verticals are hidden (same convention as ce status).
+        let composed = PipelineRepository.compose(
+            runs: [run("r1"), run("__e2e-probe", vertical: "__e2e"), run("r2", status: "running", finished: nil)],
+            stageRows: [
+                stage("r1", "personalize", seq: 2, inN: 40, outN: 36,
+                      drops: ["agent_error": 3, "no_context": 1]),
+                stage("r1", "scrape", seq: 1, inN: nil, outN: 50),
+                stage("r1", "export", seq: 3, inN: 36, outN: 30, drops: ["unedited": 6]),
+            ],
+            partial: false)
+        if composed.runs.map(\.runId) != ["r1", "r2"] {
+            problems.append("pipeline: __ test verticals must be filtered (got \(composed.runs.map(\.runId)))")
+        }
+        // Stages grouped per run + seq-ordered regardless of fetch order.
+        if composed.stagesByRun["r1"]?.map(\.stage) != ["scrape", "personalize", "export"] {
+            problems.append("pipeline: stages must be seq-ordered per run")
+        }
+
+        // Builder: injected `now` pins the 7d KPI; funnel + drops widgets present.
+        let now = DateParse.iso("2026-07-10T00:00:00+00:00")!
+        let dash = PipelineBuilder.build(composed, now: now)
+        if case .kpi(let k)? = dash.widgets["kpi-runs-7d"], k.value != 2 {
+            problems.append("pipeline: runs-7d KPI should count both visible runs (got \(String(describing: dash.widgets["kpi-runs-7d"])))")
+        }
+        if case .statusBoard(let board)? = dash.widgets["latest-funnel"] {
+            if board.groups.map(\.label) != ["scrape –→50", "personalize 40→36", "export 36→30"] {
+                problems.append("pipeline: funnel labels/order wrong (got \(board.groups.map(\.label)))")
+            }
+        } else {
+            problems.append("pipeline: latest-funnel widget missing")
+        }
+        if case .statusBoard(let drops)? = dash.widgets["latest-drops"] {
+            // Sorted by count desc then name: unedited 6, agent_error 3, no_context 1.
+            if drops.groups.map(\.label) != ["unedited", "agent_error", "no_context"] {
+                problems.append("pipeline: drops ordering wrong (got \(drops.groups.map(\.label)))")
+            }
+        } else {
+            problems.append("pipeline: latest-drops widget missing")
+        }
+        if case .table(let t)? = dash.widgets["runs-table"] {
+            if t.title != "Pipeline Runs" {
+                problems.append("pipeline: non-partial table title wrong")
+            }
+            if t.rows.first?["duration"]?.displayString != "12m 30s" {
+                problems.append("pipeline: duration format wrong (got \(String(describing: t.rows.first?["duration"])))")
+            }
+            if t.rows.first?["out"]?.displayString.hasPrefix("30") != true {
+                problems.append("pipeline: leads-out should read the LAST stage with a count_out")
+            }
+        } else {
+            problems.append("pipeline: runs-table missing")
+        }
+
+        // Partial flag surfaces honestly in the table title.
+        let partialDash = PipelineBuilder.build(
+            PipelineRepository.compose(runs: [run("r1")], stageRows: [], partial: true), now: now)
+        if case .table(let t)? = partialDash.widgets["runs-table"],
+           !t.title.contains("partial data") {
+            problems.append("pipeline: partial flag must surface in the runs-table title")
+        }
+
+        // runsCap window: compose caps the visible list (repository fetches cap+1).
+        let many = (0...PipelineRepository.runsCap).map { run("r\($0)") }   // cap+1 runs
+        let capped = PipelineRepository.compose(runs: many, stageRows: [], partial: true)
+        if capped.runs.count != PipelineRepository.runsCap {
+            problems.append("pipeline: compose must cap visible runs at runsCap")
+        }
+
+        // Unfinished/missing timestamps render as em-dash, never a negative duration.
+        if PipelineBuilder.durationText(started: "2026-07-08T10:00:00+00:00", finished: nil) != "—"
+            || PipelineBuilder.durationText(started: nil, finished: nil) != "—" {
+            problems.append("pipeline: open-ended durations must render as —")
+        }
+
+        // Review-fix pins (P5 review round):
+        // 1) Phantom-'running' liveness bound — a stale 'running' run must NOT
+        //    count as live (it would pin the 8s poll cadence forever).
+        let livenessNow = DateParse.iso("2026-07-08T20:00:00+00:00")!
+        let fresh = run("fresh", status: "running",
+                        started: "2026-07-08T19:30:00+00:00", finished: nil)
+        let phantom = run("phantom", status: "running",
+                          started: "2026-07-08T02:00:00+00:00", finished: nil)
+        let noTimestamp = run("nots", status: "running", started: nil, finished: nil)
+        if !PipelineDashboardViewModel.isLiveRunning(fresh, now: livenessNow) {
+            problems.append("pipeline: a 30-min-old running run must count as live")
+        }
+        if PipelineDashboardViewModel.isLiveRunning(phantom, now: livenessNow) {
+            problems.append("pipeline: an 18h-old 'running' run is a phantom, not live")
+        }
+        if PipelineDashboardViewModel.isLiveRunning(noTimestamp, now: livenessNow) {
+            problems.append("pipeline: a 'running' run with no started_at must not count as live")
+        }
+        // 2) Stage window must come from VISIBLE runs — a burst of __ test runs
+        //    must not push the latest real run out of its own funnel window.
+        let windowRuns = [run("__t1", vertical: "__e2e"), run("__t2", vertical: "__e2e"),
+                          run("real1"), run("real2")]
+        if PipelineRepository.visibleRuns(windowRuns).map(\.runId) != ["real1", "real2"] {
+            problems.append("pipeline: visibleRuns must filter __ test runs before windowing")
+        }
+        // 3) Event key stays unique even when the optional PK is nil.
+        let nilIdEvent = { (stage: String) in
+            PipelineLeadEventRow(id: nil, runId: "r1", stage: stage, leadId: "l1",
+                                 status: "ok", dropReason: nil, input: nil,
+                                 output: nil, createdAt: "t1")
+        }
+        if nilIdEvent("research").stableKey == nilIdEvent("personalize").stableKey {
+            problems.append("pipeline: nil-id events must not share a stableKey (cards would collapse)")
+        }
+        // 4) String escaping: newlines/backslashes in copy render escaped, valid-JSON style.
+        if JSONValue.string("line1\nline2\\end\t.").prettyPrinted
+            != "\"line1\\nline2\\\\end\\t.\"" {
+            problems.append("pipeline: JSONValue string escaping wrong: \(JSONValue.string("line1\nline2\\end\t.").prettyPrinted)")
+        }
+
+        // JSONValue: deterministic pretty-print (sorted keys, ints without .0).
+        let snapshot = JSONValue.object([
+            "opener": .string("Saw the Tempe expansion"),
+            "confidence": .number(3),
+            "valid": .bool(true),
+            "tags": .array([.string("a"), .null]),
+        ])
+        let expected = """
+        {
+          "confidence": 3,
+          "opener": "Saw the Tempe expansion",
+          "tags": [
+            "a",
+            null
+          ],
+          "valid": true
+        }
+        """
+        if snapshot.prettyPrinted != expected {
+            problems.append("pipeline: JSONValue pretty-print not deterministic/expected:\n\(snapshot.prettyPrinted)")
+        }
+
+        return problems
+    }
 }
 
 /// A tiny thread-safe call counter for the resolver gate test.
