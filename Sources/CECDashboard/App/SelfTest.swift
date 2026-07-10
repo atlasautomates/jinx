@@ -171,6 +171,9 @@ enum SelfTest {
         // ── Lead profile: ProfileRepository.compose (P3) ────────────────────────────
         problems.append(contentsOf: profileComposeChecks())
 
+        // ── Pinned leads: PinsStore (P5) ────────────────────────────────────────────
+        problems.append(contentsOf: pinsChecks())
+
         // ── Campaigns tab: CampaignsRepository.compose + CampaignBuilder ────────────
         // The compose path is pure (no I/O), so we exercise the join/binding edge cases
         // here rather than against the live DB.
@@ -249,6 +252,50 @@ enum SelfTest {
             problems.append("leads-voice: a clean tally must not carry the incomplete caveat")
         }
 
+        return problems
+    }
+
+    /// Exercises the pins store (P5): toggle semantics, file round-trip in a
+    /// throwaway temp dir, and corrupt-file tolerance (modeled on the old
+    /// LayoutCache selftest block).
+    private static func pinsChecks() -> [String] {
+        var problems: [String] = []
+        let a = LeadRef(id: "A", companyName: "Acme", email: nil)
+        let b = LeadRef(id: "B", companyName: nil, email: "b@x.com")
+
+        // Toggle: pin → newest-first; re-pin same id → unpin; other pin untouched.
+        var pins = PinsStore.toggled([], with: a)
+        pins = PinsStore.toggled(pins, with: b)
+        if pins.map(\.id) != ["B", "A"] {
+            problems.append("pins: toggle must prepend newest (got \(pins.map(\.id)))")
+        }
+        pins = PinsStore.toggled(pins, with: a)
+        if pins.map(\.id) != ["B"] {
+            problems.append("pins: re-toggle must unpin (got \(pins.map(\.id)))")
+        }
+
+        // Round-trip in a temp dir.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CECDashboardPinsSelfTest-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        if !PinsStore.save([a, b], to: tmp) {
+            problems.append("pins: save to temp dir failed")
+        }
+        let loaded = PinsStore.load(from: tmp)
+        if loaded.map(\.id) != ["A", "B"] || loaded.first?.companyName != "Acme" {
+            problems.append("pins: round-trip lost data (got \(loaded.map(\.id)))")
+        }
+
+        // Corrupt file → empty, never a crash; absent dir → empty.
+        try? Data("not json".utf8).write(
+            to: tmp.appendingPathComponent(PinsStore.filename))
+        if !PinsStore.load(from: tmp).isEmpty {
+            problems.append("pins: corrupt file must load as empty")
+        }
+        if !PinsStore.load(from: tmp.appendingPathComponent("nope")).isEmpty {
+            problems.append("pins: absent dir must load as empty")
+        }
         return problems
     }
 
@@ -490,6 +537,32 @@ enum SelfTest {
             campaigns: campaigns, tracking: tracking, leadRows: leadRows, sendRows: sendRows, partial: true)
         if case .table(let t)? = CampaignBuilder.build(degraded).widgets["campaigns-table"], !t.title.contains("partial") {
             problems.append("campaigns: partial load should mark the table title 'partial'")
+        }
+
+        // ── Roster left-join (P4 inspector) ─────────────────────────────────
+        func rosterRow(_ id: String?, status: String = "sent") -> CampaignRosterRow {
+            CampaignRosterRow(leadId: id, status: status, addedAt: "2026-07-01T00:00:00+00:00")
+        }
+        let names = ["L1": LeadSearchHit(id: "L1", companyName: "Acme", email: "a@x.com"),
+                     "L2": LeadSearchHit(id: "L2", companyName: nil, email: "b@x.com")]
+        let roster = CampaignsRepository.composeRoster(
+            rows: [rosterRow("L1"), rosterRow("L2"), rosterRow("L3"), rosterRow(nil)],
+            names: names)
+        if roster.map(\.leadId) != ["L1", "L2", "L3"] {
+            problems.append("campaigns: roster must preserve order + drop nil lead_ids "
+                + "(got \(roster.map(\.leadId)))")
+        }
+        if roster.first?.companyName != "Acme" {
+            problems.append("campaigns: roster join lost the lead name")
+        }
+        if roster[1].companyName != nil || roster[1].email != "b@x.com" {
+            problems.append("campaigns: nil company must keep email fallback")
+        }
+        if roster[2].companyName != nil || roster[2].email != nil {
+            problems.append("campaigns: unmatched lead must keep nils (left join)")
+        }
+        if CampaignsRepository.composeRoster(rows: [], names: [:]).isEmpty == false {
+            problems.append("campaigns: empty roster must compose empty")
         }
 
         return problems

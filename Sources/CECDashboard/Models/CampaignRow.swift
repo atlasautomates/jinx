@@ -95,3 +95,30 @@ struct CampaignInputs {
     /// keeps existing call sites (e.g. selftest fixtures) working.
     var partial: Bool = false
 }
+
+// MARK: - Campaign inspector roster (P4)
+
+/// One `campaign_leads` row for the selected campaign's roster read.
+struct CampaignRosterRow: Codable {
+    let leadId: String?
+    let status: String?
+    let addedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case leadId = "lead_id"
+        case addedAt = "added_at"
+    }
+}
+
+/// A roster row joined with the lead's name/email (left join — a missing
+/// `leads` row still renders, falling back to email/"Unknown").
+struct CampaignRosterEntry: Identifiable {
+    let leadId: String
+    let status: String?
+    let addedAt: String?
+    let companyName: String?
+    let email: String?
+
+    var id: String { leadId }
+}

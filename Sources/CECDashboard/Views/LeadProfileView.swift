@@ -8,6 +8,7 @@ struct LeadProfileView: View {
     let ref: LeadRef
     @State private var model = LeadProfileModel()
     @Environment(\.dismiss) private var dismiss
+    @Environment(PinsModel.self) private var pinsModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -39,10 +40,26 @@ struct LeadProfileView: View {
             }
             Spacer()
             if model.isLoading { ProgressView().controlSize(.small) }
+            // Pin under the FETCHED identity when available — the entry-point
+            // ref may lack the company/email the chip wants to display.
+            Button {
+                pinsModel.toggle(pinRef)
+            } label: {
+                Label(pinsModel.isPinned(ref.id) ? "Unpin" : "Pin",
+                      systemImage: pinsModel.isPinned(ref.id) ? "pin.slash" : "pin")
+            }
             Button("Close") { dismiss() }
                 .keyboardShortcut(.cancelAction)
         }
         .padding(Space.s4)
+    }
+
+    /// The richest identity available for the pin chip (fetched > entry ref).
+    private var pinRef: LeadRef {
+        LeadRef(id: ref.id,
+                companyName: model.inputs?.lead.companyName?.nilIfEmpty
+                    ?? ref.companyName,
+                email: model.inputs?.lead.email?.nilIfEmpty ?? ref.email)
     }
 
     private var subtitle: String {

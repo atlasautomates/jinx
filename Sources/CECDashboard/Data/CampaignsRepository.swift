@@ -119,6 +119,90 @@ struct CampaignsRepository {
         name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfEmpty
     }
 
+    // MARK: - Campaign inspector roster (P4)
+
+    /// Runaway bound on roster paging: 10 pages × ≤1000 rows.
+    static let rosterMaxPages = 10
+
+    /// The selected campaign's full roster, newest-added first, joined with
+    /// lead names/emails. The roster read is ESSENTIAL (throws → the detail
+    /// pane shows the error); the name join fails open (a miss renders
+    /// email/"Unknown", never fails the roster). Paged with empty-page
+    /// termination (PostgREST caps responses at 1000 regardless of limit).
+    func roster(campaignId: String) async throws
+        -> (entries: [CampaignRosterEntry], truncated: Bool, namesDegraded: Bool) {
+        let id = ProfileRepository.sanitized(campaignId)
+        guard !id.isEmpty else { return ([], false, false) }
+
+        var rows: [CampaignRosterRow] = []
+        var offset = 0
+        var complete = false
+        for _ in 0..<Self.rosterMaxPages {
+            let data = try await client.get("campaign_leads", [
+                URLQueryItem(name: "select", value: "lead_id,status,added_at"),
+                URLQueryItem(name: "campaign_id", value: "eq.\(id)"),
+                URLQueryItem(name: "order", value: "added_at.desc,lead_id.asc"),
+                URLQueryItem(name: "limit", value: "1000"),
+                URLQueryItem(name: "offset", value: String(offset)),
+            ])
+            let page = try JSONDecoder().decode([CampaignRosterRow].self, from: data)
+            rows.append(contentsOf: page)
+            // A SHORT page proves exhaustion (code review: empty-only left a
+            // short final page on the last iteration flagged as truncated).
+            // Only "every page full, budget spent" stays ambiguous → flagged.
+            if page.count < 1000 { complete = true; break }
+            offset += page.count
+        }
+
+        let (names, namesOK) = await leadNames(ids: rows.compactMap(\.leadId))
+        return (Self.composeRoster(rows: rows, names: names), !complete, !namesOK)
+    }
+
+    /// Pure left-join seam (SelfTest target): roster order preserved; rows
+    /// with no `leads` match keep nil name/email; nil lead_ids are dropped
+    /// (they can't open a profile and shouldn't render a dead row).
+    static func composeRoster(rows: [CampaignRosterRow],
+                              names: [String: LeadSearchHit]) -> [CampaignRosterEntry] {
+        rows.compactMap { row in
+            guard let leadId = row.leadId?.nilIfEmpty else { return nil }
+            let hit = names[leadId]
+            return CampaignRosterEntry(leadId: leadId,
+                                       status: row.status,
+                                       addedAt: row.addedAt,
+                                       companyName: hit?.companyName,
+                                       email: hit?.email)
+        }
+    }
+
+    /// Names/emails for the roster's lead ids — fail-open + chunked in.()
+    /// (150 UUIDs/request keeps URLs far from any proxy limit). `ok: false`
+    /// when any chunk failed, so the view can caption the degradation instead
+    /// of rendering indistinguishable "Unknown" rows (reliability review).
+    private func leadNames(ids: [String]) async -> (byId: [String: LeadSearchHit], ok: Bool) {
+        let unique = Array(Set(ids.map(ProfileRepository.sanitized)))
+            .filter { !$0.isEmpty }
+        guard !unique.isEmpty else { return ([:], true) }
+        var byId: [String: LeadSearchHit] = [:]
+        var ok = true
+        for chunk in stride(from: 0, to: unique.count, by: 150)
+            .map({ Array(unique[$0..<min($0 + 150, unique.count)]) }) {
+            do {
+                let data = try await client.get("leads", [
+                    URLQueryItem(name: "select", value: "id,company_name,email"),
+                    URLQueryItem(name: "id", value: "in.(\(chunk.joined(separator: ",")))"),
+                ])
+                for hit in try JSONDecoder().decode([LeadSearchHit].self, from: data) {
+                    byId[hit.id] = hit
+                }
+            } catch {
+                ok = false
+                NSLog("CampaignsRepository.leadNames chunk failed (rows fall back to email/Unknown): %@",
+                      error.localizedDescription)
+            }
+        }
+        return (byId, ok)
+    }
+
     // MARK: - Table reads
 
     /// All campaigns, newest first.

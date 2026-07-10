@@ -5,9 +5,12 @@ struct RootView: View {
     @State private var campaignModel = CampaignDashboardViewModel()
     @State private var pipelineModel = PipelineDashboardViewModel()
     @State private var inspectorModel = LeadInspectorModel()
+    @State private var campaignInspectorModel = CampaignInspectorModel()
     // One profile seam for every tab: rows set `presenter.active`, this view
     // presents the sheet (P3).
     @State private var profilePresenter = ProfilePresenter()
+    // Pinned leads (P5): local JSON store, loaded once, injected app-wide.
+    @State private var pinsModel = PinsModel()
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
@@ -24,12 +27,14 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .frame(minWidth: 820, minHeight: 600)
         .environment(profilePresenter)
+        .environment(pinsModel)
         .sheet(item: Bindable(profilePresenter).active) { ref in
             // Explicit injection: sheet content is a separate presentation
             // host — never rely on cross-boundary environment inheritance
-            // (platform review; P5's pin button consumes the presenter).
+            // (platform review; the pin button consumes both).
             LeadProfileView(ref: ref)
                 .environment(profilePresenter)
+                .environment(pinsModel)
         }
         .background(WindowAccessor { titlebarHover.attach(to: $0) })
         .task { await model.load() }            // initial Leads load
@@ -87,15 +92,18 @@ struct RootView: View {
     /// Widget grid on top, native clickable recent-leads list below (P3) —
     /// same VSplitView shape as the Pipeline tab's dashboard/inspector split.
     private func leadsSplit(dashboard: Dashboard, staleMessage: String?) -> some View {
-        VSplitView {
-            DashboardShell(
-                dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
-                staleMessage: staleMessage,
-                onRefresh: { Task { await model.load() } }
-            )
-            .frame(minHeight: 260)
-            RecentLeadsList(leads: model.recentLeads)
-                .frame(minHeight: 160, idealHeight: 240)
+        VStack(spacing: 0) {
+            PinnedStrip()
+            VSplitView {
+                DashboardShell(
+                    dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
+                    staleMessage: staleMessage,
+                    onRefresh: { Task { await model.load() } }
+                )
+                .frame(minHeight: 260)
+                RecentLeadsList(leads: model.recentLeads)
+                    .frame(minHeight: 160, idealHeight: 240)
+            }
         }
     }
 
@@ -107,18 +115,27 @@ struct RootView: View {
         case .idle, .loading:
             LoadingView()
         case .loaded(let dashboard):
-            DashboardShell(
-                dashboard: dashboard, title: "Campaigns", isRefreshing: campaignModel.isRefreshing,
-                onRefresh: { Task { await campaignModel.load() } }
-            )
+            campaignsSplit(dashboard: dashboard, staleMessage: nil)
         case .stale(let dashboard, _, let message):
-            DashboardShell(
-                dashboard: dashboard, title: "Campaigns", isRefreshing: campaignModel.isRefreshing,
-                staleMessage: message,
-                onRefresh: { Task { await campaignModel.load() } }
-            )
+            campaignsSplit(dashboard: dashboard, staleMessage: message)
         case .failed(let message):
             ErrorView(message: message, onRetry: { Task { await campaignModel.load() } })
+        }
+    }
+
+    /// Aggregate dashboard on top, campaign inspector below (P4) — the same
+    /// VSplitView shape as the Pipeline tab.
+    private func campaignsSplit(dashboard: Dashboard, staleMessage: String?) -> some View {
+        VSplitView {
+            DashboardShell(
+                dashboard: dashboard, title: "Campaigns", isRefreshing: campaignModel.isRefreshing,
+                staleMessage: staleMessage,
+                onRefresh: { Task { await campaignModel.load() } }
+            )
+            .frame(minHeight: 240)
+            CampaignInspectorView(model: campaignInspectorModel,
+                                  summaries: campaignModel.summaries)
+                .frame(minHeight: 180, idealHeight: 300)
         }
     }
 

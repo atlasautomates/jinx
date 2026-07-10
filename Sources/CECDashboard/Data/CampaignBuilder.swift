@@ -6,7 +6,8 @@ import Foundation
 enum CampaignBuilder {
 
     /// Canonical funnel order + color for campaign_leads.status values.
-    private static let statusOrder: [(key: String, label: String, color: String)] = [
+    /// Internal: the campaign inspector's detail funnel (P4) renders from it too.
+    static let statusOrder: [(key: String, label: String, color: String)] = [
         ("pending", "Pending", "blue"),
         ("sent", "Sent", "green"),
         ("replied", "Replied", "purple"),

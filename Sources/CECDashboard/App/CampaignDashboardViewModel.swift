@@ -9,6 +9,9 @@ import Observation
 @Observable
 final class CampaignDashboardViewModel {
     private(set) var state: Loadable<Dashboard> = .idle
+    /// The composed summaries behind the dashboard — feeds the campaign
+    /// inspector's clickable list (P4).
+    private(set) var summaries: [CampaignSummary] = []
     private(set) var isRefreshing = false
 
     func load() async {
@@ -23,6 +26,7 @@ final class CampaignDashboardViewModel {
             let client = try SupabaseClient.make()
             let repo = CampaignsRepository(client: client)
             let inputs = try await repo.fetch()
+            summaries = inputs.summaries
             state = .loaded(CampaignBuilder.build(inputs))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
