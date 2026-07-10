@@ -38,6 +38,9 @@ enum SupabaseCheck {
                 // lead_interactions (migration lead_interactions_anon_read).
                 let profileRepo = ProfileRepository(client: client)
                 async let interactionsTask = profileRepo.fetchProbe()
+                // P6: readability probe ONLY — the full paged scan could blow
+                // the 20s diagnostic wall as data grows (platform review).
+                async let backlogTask = BacklogRepository(client: client).readProbe()
 
                 let leadsProbe = try await leadsProbeTask           // essential
                 let tiers = await tiersTask
@@ -45,6 +48,7 @@ enum SupabaseCheck {
                 let runs = (try? await runsTask) ?? []
                 let events = await eventsTask
                 let interactionsOK = await interactionsTask
+                let backlogOK = await backlogTask
                 // Stage read depends on run ids — the one sequential follow-up.
                 let (stageRows, stagesOK) = await pipeRepo.stageRuns(
                     runIds: runs.prefix(3).map(\.runId))
@@ -59,6 +63,8 @@ enum SupabaseCheck {
                     + (runs.isEmpty ? " — EMPTY (no runs / no RLS policy on pipeline_runs)" : "")
                     + (interactionsOK ? ", lead_interactions readable"
                        : ", lead_interactions read FAILED (missing lead_interactions_anon_read migration?)")
+                    + (backlogOK ? ", backlog tables readable"
+                       : ", backlog tables UNREADABLE (campaign_leads / v_campaign_ready)")
                 result.message = "reached \(client.baseURL.host ?? "supabase"), "
                     + "\(leadsProbe.count) lead(s) sampled (full select incl. enrichment_stage)"
                     + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)"

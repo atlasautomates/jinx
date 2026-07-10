@@ -174,6 +174,9 @@ enum SelfTest {
         // ── Pinned leads: PinsStore (P5) ────────────────────────────────────────────
         problems.append(contentsOf: pinsChecks())
 
+        // ── Healing backlog: BacklogRepository.compose (P6) ─────────────────────────
+        problems.append(contentsOf: backlogComposeChecks())
+
         // ── Campaigns tab: CampaignsRepository.compose + CampaignBuilder ────────────
         // The compose path is pure (no I/O), so we exercise the join/binding edge cases
         // here rather than against the live DB.
@@ -252,6 +255,61 @@ enum SelfTest {
             problems.append("leads-voice: a clean tally must not carry the incomplete caveat")
         }
 
+        return problems
+    }
+
+    /// Exercises the backlog compose (P6): enrollment exclusion + excluded
+    /// count, GENERIC reason bucketing (a novel reason must not vanish),
+    /// cohort ("?","?") fallbacks + largest-first ordering, truncation flag.
+    /// Mirrors ce doctor's check_dead_ends semantics exactly.
+    private static func backlogComposeChecks() -> [String] {
+        var problems: [String] = []
+        func flag(_ id: String?, reason: String?, source: String? = "sales-nav",
+                  query: String? = "biotech-europe") -> CampaignReadyRow {
+            CampaignReadyRow(leadId: id, leadSource: source, searchQuery: query,
+                             blockingReason: reason)
+        }
+
+        let composed = BacklogRepository.compose(
+            flagged: [
+                flag("a", reason: "unedited"),
+                flag("b", reason: "unedited"),
+                flag("c", reason: "unedited", source: "gmaps-leads", query: "coffee carts"),
+                flag("d", reason: "no_email_yet"),          // novel reason — must survive
+                flag("e", reason: nil, source: nil, query: nil),   // all fallbacks
+                flag("x", reason: "unedited"),              // enrolled → excluded
+                flag(nil, reason: "unedited"),              // nil id → NOT excludable, counted
+            ],
+            enrolled: ["x", "unrelated"],
+            scanTruncated: true)
+        if composed.byReason != ["unedited": 4, "no_email_yet": 1, "?": 1] {
+            problems.append("backlog: reason buckets wrong (got \(composed.byReason))")
+        }
+        if composed.alreadyEnrolled != 1 {
+            problems.append("backlog: exactly one enrolled lead must be excluded")
+        }
+        // Full ordering pin: largest first, then (source, query) ascending
+        // tiebreak — and never force-unwrap (a regression must report, not
+        // crash the harness).
+        let cohortTuples = composed.cohorts.map { ($0.source, $0.query, $0.count) }
+        let expectedCohorts = [("sales-nav", "biotech-europe", 4),
+                               ("?", "?", 1),
+                               ("gmaps-leads", "coffee carts", 1)]
+        if cohortTuples.count != expectedCohorts.count
+            || !zip(cohortTuples, expectedCohorts).allSatisfy({ $0 == $1 }) {
+            problems.append("backlog: cohort ordering/tiebreak wrong (got \(cohortTuples))")
+        }
+        if !composed.scanTruncated {
+            problems.append("backlog: truncation flag must pass through")
+        }
+
+        // Fully-enrolled backlog → empty buckets + full excluded count.
+        let allEnrolled = BacklogRepository.compose(
+            flagged: [flag("a", reason: "unedited"), flag("b", reason: "no_opener")],
+            enrolled: ["a", "b"], scanTruncated: false)
+        if !allEnrolled.byReason.isEmpty || allEnrolled.alreadyEnrolled != 2 {
+            problems.append("backlog: fully-enrolled set must compose empty + count 2 excluded")
+        }
         return problems
     }
 

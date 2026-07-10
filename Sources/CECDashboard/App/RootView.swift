@@ -6,6 +6,7 @@ struct RootView: View {
     @State private var pipelineModel = PipelineDashboardViewModel()
     @State private var inspectorModel = LeadInspectorModel()
     @State private var campaignInspectorModel = CampaignInspectorModel()
+    @State private var backlogModel = BacklogViewModel()
     // One profile seam for every tab: rows set `presenter.active`, this view
     // presents the sheet (P3).
     @State private var profilePresenter = ProfilePresenter()
@@ -39,8 +40,9 @@ struct RootView: View {
         .background(WindowAccessor { titlebarHover.attach(to: $0) })
         .task { await model.load() }            // initial Leads load
         .task { await campaignModel.load() }    // initial Campaigns load
+        .task { await backlogModel.load() }     // initial backlog scan (P6)
         .task { await pipelinePolling() }       // Pipeline: own loop (fast while a run is live)
-        .task { await periodicRefresh() }       // re-fetch Leads+Campaigns every 10 min
+        .task { await periodicRefresh() }       // re-fetch Leads+Campaigns+backlog every 10 min
     }
 
     /// Re-fetch Leads + Campaigns every 10 minutes while the app is open (both use
@@ -51,11 +53,12 @@ struct RootView: View {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
             if Task.isCancelled { break }
-            // Refresh both tabs concurrently — they hit independent tables and each
-            // guards its own in-flight refresh, so there's no ordering dependency.
+            // Refresh concurrently — independent tables, each guards its own
+            // in-flight refresh, so there's no ordering dependency.
             async let leads: Void = model.load()
             async let campaigns: Void = campaignModel.load()
-            _ = await (leads, campaigns)
+            async let backlog: Void = backlogModel.load()
+            _ = await (leads, campaigns, backlog)
         }
     }
 
@@ -148,9 +151,11 @@ struct RootView: View {
     private var pipelineTab: some View {
         VSplitView {
             pipelineDashboard
-                .frame(minHeight: 240)   // 240+160 fits the 600pt window floor
+                .frame(minHeight: 220)
+            BacklogBoardView(model: backlogModel)
+                .frame(minHeight: 96, idealHeight: 150)   // P6 backlog board
             LeadInspectorView(model: inspectorModel)
-                .frame(minHeight: 160)   // with tab bar + splitter headroom
+                .frame(minHeight: 150)
         }
     }
 
