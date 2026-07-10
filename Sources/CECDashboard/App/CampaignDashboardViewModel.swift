@@ -3,7 +3,7 @@ import Observation
 
 /// Owns the Campaigns tab's async state. Mirrors `DashboardViewModel` but simpler:
 /// the layout is deterministic (built in `CampaignBuilder`), so there's no if-changed
-/// layout gate / Haiku call — just fetch → compose → render, with the same
+/// layout gate — just fetch → compose → render, with the same
 /// loading / loaded / stale / failed semantics (never a silent blank).
 @MainActor
 @Observable

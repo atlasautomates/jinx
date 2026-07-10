@@ -8,4 +8,7 @@ struct DashboardInputs {
     let totalCount: Int
     var tierCounts: [String: Int] = [:]        // lead_enrichment.lead_tier → count
     var sentimentCounts: [String: Int] = [:]   // replies.sentiment → count
+    /// True when a supplementary read FAILED (vs. genuinely empty) — surfaced in a
+    /// widget title so degraded data is never mistaken for complete data.
+    var partial: Bool = false
 }

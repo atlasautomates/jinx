@@ -1,7 +1,7 @@
 import Foundation
 
 /// Headless verification of the decode contract (run with `--selftest`).
-/// Exercises the same Codable path `claude -p` output will take in M2.
+/// Exercises the decode contract plus every pure builder/compose seam.
 enum SelfTest {
     static func run() -> Never {
         guard let dash = MockData.dashboard else {
@@ -55,9 +55,13 @@ enum SelfTest {
                     leadSource: "gmaps-leads", city: nil, state: nil, createdAt: nil),
         ]
         let built = DashboardBuilder.build(DashboardInputs(leads: sampleLeads, totalCount: 720))
-        if Set(built.layout.widgets.map { $0.id }) != ["total-leads", "by-source", "added-weekly", "recent-leads"] {
-            problems.append("builder: unexpected widget ids")
+        // Deterministic plan: tier/sentiment boards are skipped when their
+        // supplementary counts are empty (empty board = noise).
+        if Set(built.layout.widgets.map { $0.id })
+            != ["total-leads", "by-source", "by-industry", "added-weekly", "recent-leads"] {
+            problems.append("builder: unexpected widget ids (\(built.layout.widgets.map { $0.id }.sorted()))")
         }
+        problems.append(contentsOf: validateGrid(built.layout, label: "leads-build"))
         if case .kpi(let kpi)? = built.widgets["total-leads"], kpi.value != 720 {
             problems.append("builder: total-leads KPI should reflect totalCount (got \(kpi.value))")
         }
@@ -93,7 +97,7 @@ enum SelfTest {
             problems.append("builder: gap chart is not a chart")
         }
 
-        // Packer (M2): an LLM plan must expand to a grid with NO overlaps and every
+        // Packer: any plan must expand to a grid with NO overlaps and every
         // rect in-bounds, at every breakpoint — the "can't make a broken grid" guarantee.
         let plan = LayoutPlan(widgets: [
             PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: 1),
@@ -114,43 +118,10 @@ enum SelfTest {
             problems.append("packer: full-size widget should span all 12 lg cols, got \(r.w)")
         }
 
-        // DataProfile (M2 step B): key is deterministic, stable to small changes,
-        // and shifts when the data character changes.
-        let leadsA: [LeadRow] = [
-            LeadRow(id: "1", companyName: "A", firstName: nil, industry: "Auto",
-                    leadSource: "gmaps-leads", city: "Tampa", state: "FL", createdAt: "2026-06-10T00:00:00+00:00"),
-            LeadRow(id: "2", companyName: "B", firstName: nil, industry: "Biotech",
-                    leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T00:00:00+00:00"),
-        ]
-        let p1 = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 300))
-        let p1again = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 300))
-        if p1.key != p1again.key { problems.append("profile: key not deterministic") }
-        if p1.key.isEmpty { problems.append("profile: key is empty") }
-        // Adding one lead (still same buckets) must NOT change the key.
-        let p1plus = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 301))
-        if p1.key != p1plus.key { problems.append("profile: key over-sensitive to a tiny change") }
-        // Crossing a magnitude bucket (300→5000) MUST change the key.
-        let p2 = DataProfile.from(DashboardInputs(leads: leadsA, totalCount: 5000))
-        if p1.key == p2.key { problems.append("profile: key didn't shift across a magnitude bucket") }
-        // A non-magnitude signal must also move the key: 4 distinct sources (by-source
-        // high) vs leadsA's 2 (medium), same total.
-        let leads4src = (0..<4).map { i in
-            LeadRow(id: "s\(i)", companyName: "C", firstName: nil, industry: "X",
-                    leadSource: "src-\(i)", city: nil, state: nil, createdAt: nil)
-        }
-        if DataProfile.from(DashboardInputs(leads: leads4src, totalCount: 300)).key == p1.key {
-            problems.append("profile: a non-magnitude (by-source) shift didn't change the key")
-        }
-
         // availableBinds must match exactly what widgetData produces (drift guard).
         let dataKeys = Set(DashboardBuilder.widgetData(DashboardInputs(leads: sampleLeads, totalCount: 720)).keys)
         if dataKeys != DashboardBuilder.availableBinds {
             problems.append("builder: availableBinds \(DashboardBuilder.availableBinds) != widgetData keys \(dataKeys)")
-        }
-        // Every bind must appear in the Haiku prompt catalog, or the LLM is never told
-        // it exists (a silent capability loss with no other failing test).
-        for bind in DashboardBuilder.availableBinds where !LayoutPrompt.systemPrompt.contains("\"\(bind)\"") {
-            problems.append("prompt: bind '\(bind)' is missing from the LayoutPrompt catalog")
         }
 
         // M3b: tier/sentiment boards from supplementary counts (DashboardInputs).
@@ -166,65 +137,19 @@ enum SelfTest {
         if case .statusBoard(let sent)? = m3bData["sentiment-mix"] {
             if sent.groups.first?.label != "positive" { problems.append("m3b: sentiment not sorted (top should be positive)") }
         } else { problems.append("m3b: sentiment-mix is not a status board") }
-        // Empty supplementary tables → empty boards + strength "none" → not bound.
+        // Empty supplementary tables → empty board data AND the plan skips them.
         let emptyInputs = DashboardInputs(leads: sampleLeads, totalCount: 720)
         if case .statusBoard(let tier)? = DashboardBuilder.widgetData(emptyInputs)["by-tier"],
            !tier.groups.isEmpty { problems.append("m3b: empty tierCounts should yield an empty board") }
-        let prof = DataProfile.from(emptyInputs)
-        if prof.signals["by-tier"] != DataProfile.Strength.none
-            || prof.signals["sentiment-mix"] != DataProfile.Strength.none {
-            problems.append("m3b: absent tier/sentiment should profile as 'none'")
+        let m3bBuilt = DashboardBuilder.build(m3bInputs)
+        if !m3bBuilt.layout.widgets.contains(where: { $0.id == "by-tier" })
+            || !m3bBuilt.layout.widgets.contains(where: { $0.id == "sentiment-mix" }) {
+            problems.append("m3b: present tier/sentiment counts should be planned")
         }
-        if DataProfile.from(m3bInputs).signals["by-tier"] == DataProfile.Strength.none {
-            problems.append("m3b: present tier data should profile above 'none'")
-        }
+        problems.append(contentsOf: validateGrid(m3bBuilt.layout, label: "leads-build-m3b"))
 
-        // sanitize (step C bind-validation): valid plan passes; nil/empty/unknown-bind → default.
-        let knownBinds = DashboardBuilder.availableBinds
-        if LayoutResolver.sanitize(DefaultLayout.plan, knownBinds: knownBinds) != DefaultLayout.plan {
-            problems.append("sanitize: a valid default plan should pass through")
-        }
-        if LayoutResolver.sanitize(nil, knownBinds: knownBinds) != DefaultLayout.plan {
-            problems.append("sanitize: nil should fall back to default")
-        }
-        if LayoutResolver.sanitize(LayoutPlan(widgets: []), knownBinds: knownBinds) != DefaultLayout.plan {
-            problems.append("sanitize: empty plan should fall back to default")
-        }
-        let badBind = LayoutPlan(widgets: [PlannedWidget(type: .kpi, bind: "hallucinated", size: .small, priority: 1)])
-        if LayoutResolver.sanitize(badBind, knownBinds: knownBinds) != DefaultLayout.plan {
-            problems.append("sanitize: unknown bind should fall back to default (cache-poison guard)")
-        }
-
-        // LayoutEngine.parsePlan: envelope unwrap + fence stripping.
-        let goodEnvelope = #"{"is_error":false,"result":"```json\n{\"widgets\":[{\"type\":\"kpi\",\"bind\":\"total-leads\",\"size\":\"small\",\"priority\":1}]}\n```"}"#
-        if LayoutEngine.parsePlan(fromEnvelope: goodEnvelope)?.widgets.first?.bind != "total-leads" {
-            problems.append("engine: failed to parse a fenced plan from the envelope")
-        }
-        if LayoutEngine.parsePlan(fromEnvelope: #"{"is_error":true,"result":"refused"}"#) != nil {
-            problems.append("engine: an is_error envelope should yield nil")
-        }
-        if LayoutEngine.parsePlan(fromEnvelope: "not json at all") != nil {
-            problems.append("engine: non-JSON envelope should yield nil")
-        }
-
-        // LayoutCache round-trip + LayoutResolver gate (async), in a throwaway temp dir.
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("CECDashboardSelfTest", isDirectory: true)
-        LayoutCache.clear(in: tmp)
-        let counter = Counter()
-        let gen: (DataProfile) async -> LayoutPlan? = { _ in counter.bump(); return DefaultLayout.plan }
-        func resolve(_ p: DataProfile, force: Bool) {
-            _ = runSync { await LayoutResolver.resolvePlan(profile: p, force: force, cacheDir: tmp, generate: gen) }
-        }
-        resolve(p1, force: false)   // miss → generate
-        if counter.value != 1 { problems.append("resolver: first call should generate (n=\(counter.value))") }
-        resolve(p1, force: false)   // hit → reuse
-        if counter.value != 1 { problems.append("resolver: unchanged profile should reuse cache (n=\(counter.value))") }
-        resolve(p1, force: true)    // force → regenerate
-        if counter.value != 2 { problems.append("resolver: force should bypass cache (n=\(counter.value))") }
-        resolve(p2, force: false)   // changed → regenerate
-        if counter.value != 3 { problems.append("resolver: changed profile should regenerate (n=\(counter.value))") }
-        if LayoutCache.load(from: tmp)?.key != p2.key { problems.append("cache: did not persist the latest key") }
-        LayoutCache.clear(in: tmp)
+        // ── Leads tab: LeadsRepository.compose (P1 renovation seam) ────────────────
+        problems.append(contentsOf: leadsComposeChecks(sampleLeads: sampleLeads))
 
         // LeadAnswers: the shared phrasing the Siri App Intent and the --query CLI BOTH
         // route through. These assert the contract so the two voice surfaces can't drift.
@@ -261,6 +186,68 @@ enum SelfTest {
             FileHandle.standardError.write(Data("SELFTEST FAIL — \(summary)\n  - \(problems.joined(separator: "\n  - "))\n".utf8))
             exit(1)
         }
+    }
+
+    /// Exercises the Leads compose seam (P1): supplementary results carry an `ok`
+    /// flag, and a FAILED read (not an EMPTY table) marks the load partial —
+    /// surfaced in the recent-leads table title.
+    private static func leadsComposeChecks(sampleLeads: [LeadRow]) -> [String] {
+        var problems: [String] = []
+
+        // Both supplementary reads ok (even if empty) → NOT partial.
+        let clean = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: 10,
+            tiers: ([:], ok: true), sentiment: (["positive": 2], ok: true))
+        if clean.partial { problems.append("leads-compose: ok reads must not mark partial") }
+        if clean.sentimentCounts["positive"] != 2 || !clean.tierCounts.isEmpty {
+            problems.append("leads-compose: counts not packaged through")
+        }
+        if case .table(let t)? = DashboardBuilder.build(clean).widgets["recent-leads"],
+           t.title.contains("partial") {
+            problems.append("leads-compose: clean load must not title the table partial")
+        }
+
+        // A failed supplementary read → partial, surfaced in the table title.
+        let degraded = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: 10,
+            tiers: ([:], ok: false), sentiment: ([:], ok: true))
+        if !degraded.partial { problems.append("leads-compose: failed tier read must mark partial") }
+        if case .table(let t)? = DashboardBuilder.build(degraded).widgets["recent-leads"],
+           !t.title.contains("partial") {
+            problems.append("leads-compose: partial must surface in the recent-leads title")
+        }
+
+        // tally (the paged read's pure page parser): an unparseable 2xx body must
+        // read as a FAILED page (nil), never as "empty & complete" — the review-fix
+        // pin for the partial-honesty contract.
+        if LeadsRepository.tally(Data("not json".utf8), column: "lead_tier") != nil {
+            problems.append("leads-tally: garbage body must be nil (failed read), not empty")
+        }
+        let page = LeadsRepository.tally(
+            Data(#"[{"lead_tier":"1"},{"lead_tier":"1"},{"lead_tier":" "},{"lead_tier":null}]"#.utf8),
+            column: "lead_tier")
+        if page?.counts != ["1": 2] || page?.rows != 4 {
+            problems.append("leads-tally: expected {1:2}/4 rows, got \(String(describing: page))")
+        }
+        if let empty = LeadsRepository.tally(Data("[]".utf8), column: "lead_tier"),
+           empty.rows != 0 || !empty.counts.isEmpty {
+            problems.append("leads-tally: [] must be an EMPTY page (0 rows), not a failure")
+        } else if LeadsRepository.tally(Data("[]".utf8), column: "lead_tier") == nil {
+            problems.append("leads-tally: [] must parse (empty page), not read as failed")
+        }
+
+        // Voice caveats: a degraded/floored tier read speaks "incomplete", which is
+        // distinct from the recency-window "sampled" note (source/industry).
+        let spoken = LeadAnswers.breakdown(["1": 2], singular: "tier", plural: "tiers",
+                                           incomplete: true)
+        if !spoken.contains("may be incomplete") {
+            problems.append("leads-voice: incomplete tally must carry the caveat (got \(spoken))")
+        }
+        if LeadAnswers.breakdown(["1": 2], singular: "tier", plural: "tiers").contains("incomplete") {
+            problems.append("leads-voice: a clean tally must not carry the incomplete caveat")
+        }
+
+        return problems
     }
 
     /// Exercises the campaigns data path: name-join (trim/case-fold), same-source
@@ -432,18 +419,6 @@ enum SelfTest {
         return xOverlap && yOverlap
     }
 
-    /// Run an async operation to completion from the synchronous selftest (the resolver
-    /// is async now). The body runs off the main thread, so blocking here is safe.
-    private static func runSync<T>(_ body: @escaping () async -> T) -> T {
-        let sem = DispatchSemaphore(value: 0)
-        let box = ResultBox<T>()
-        Task { box.value = await body(); sem.signal() }
-        sem.wait()
-        return box.value!
-    }
-
-    private final class ResultBox<T>: @unchecked Sendable { var value: T? }
-
     /// Exercises the pipeline data path (all pure): test-vertical filtering, the
     /// runsCap window, stage grouping/ordering, funnel/drops widgets, duration
     /// formatting, the 7-day KPI window (injected `now`), the `partial` surface,
@@ -609,12 +584,4 @@ enum SelfTest {
 
         return problems
     }
-}
-
-/// A tiny thread-safe call counter for the resolver gate test.
-private final class Counter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var n = 0
-    func bump() { lock.lock(); n += 1; lock.unlock() }
-    var value: Int { lock.lock(); defer { lock.unlock() }; return n }
 }

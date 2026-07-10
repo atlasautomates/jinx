@@ -59,7 +59,8 @@ enum LeadQuery {
             let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
             return LeadAnswers.breakdown(r.counts, singular: "industry", plural: "industries", sampled: r.sampled)
         case "by-tier", "tier", "tiers":
-            return LeadAnswers.breakdown(await repo.tierCounts(), singular: "tier", plural: "tiers")
+            let r = await repo.tierCountsResult()
+            return LeadAnswers.breakdown(r.counts, singular: "tier", plural: "tiers", incomplete: !r.ok)
         default:
             throw QueryError.unknownMetric(metric)
         }

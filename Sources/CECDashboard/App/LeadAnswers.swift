@@ -25,13 +25,16 @@ enum LeadAnswers {
     /// data is empty, "No <singular> data yet." Top-3 by count desc then key asc; each
     /// label capped so a pathological scraped value can't dominate the utterance.
     static func breakdown(_ counts: [String: Int], singular: String, plural: String,
-                          sampled: Bool = false) -> String {
+                          sampled: Bool = false, incomplete: Bool = false) -> String {
         guard !counts.isEmpty else { return "No \(singular) data yet." }
         let top = counts
             .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
             .prefix(3)
         let body = top.map { "\($0.key.prefix(40)) with \($0.value)" }.joined(separator: ", ")
-        let note = sampled ? " — among the \(breakdownWindow) most recent leads" : ""
+        // `sampled` = a recency window (source/industry); `incomplete` = a degraded
+        // or floored table read (tier). Different caveats — never claim exactness.
+        let note = incomplete ? " — the tally may be incomplete"
+            : (sampled ? " — among the \(breakdownWindow) most recent leads" : "")
         return "Top \(plural): \(body)\(note)."
     }
 }

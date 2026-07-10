@@ -27,10 +27,10 @@ struct RootView: View {
         .task { await periodicRefresh() }       // re-fetch Leads+Campaigns every 10 min
     }
 
-    /// Re-fetch Leads + Campaigns every 10 minutes while the app is open. Leads' layout
-    /// passes through the if-changed gate (Haiku only on profile shift); Campaigns uses a
-    /// fixed deterministic layout, so it just re-fetches data. Manual Refresh stays per-tab.
-    /// (Pipeline is deliberately NOT in this fan-out — `pipelinePolling` owns its cadence.)
+    /// Re-fetch Leads + Campaigns every 10 minutes while the app is open (both use
+    /// fixed deterministic layouts, so this is a pure data refresh). Manual Refresh
+    /// stays per-tab. (Pipeline is deliberately NOT in this fan-out —
+    /// `pipelinePolling` owns its cadence.)
     private func periodicRefresh() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
@@ -57,7 +57,7 @@ struct RootView: View {
         }
     }
 
-    // MARK: - Leads tab (adaptive layout via Haiku; Re-layout button enabled)
+    // MARK: - Leads tab (fixed deterministic layout, like Campaigns/Pipeline)
 
     @ViewBuilder
     private var leadsTab: some View {
@@ -67,15 +67,13 @@ struct RootView: View {
         case .loaded(let dashboard):
             DashboardShell(
                 dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
-                onRefresh: { Task { await model.load() } },
-                onRelayout: { Task { await model.load(force: true) } }
+                onRefresh: { Task { await model.load() } }
             )
         case .stale(let dashboard, _, let message):
             DashboardShell(
                 dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
                 staleMessage: message,
-                onRefresh: { Task { await model.load() } },
-                onRelayout: { Task { await model.load(force: true) } }
+                onRefresh: { Task { await model.load() } }
             )
         case .failed(let message):
             ErrorView(message: message, onRetry: { Task { await model.load() } })

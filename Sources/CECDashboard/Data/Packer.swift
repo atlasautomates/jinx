@@ -5,7 +5,7 @@ import Foundation
 /// Uses left-to-right, top-to-bottom shelf packing per breakpoint: each widget's
 /// column span comes from its size class, it's placed at the current cursor, and the
 /// row wraps when the next widget wouldn't fit. This GUARANTEES, by construction:
-/// no overlaps, every span within the column count, every widget placed. The LLM
+/// no overlaps, every span within the column count, every widget placed. The builder
 /// only chooses type/bind/size/priority — it can never emit a broken grid.
 ///
 /// Pure and synchronous → trivially testable, no I/O.
@@ -65,7 +65,7 @@ enum Packer {
     /// Column span for a size class at a breakpoint (12 / 10 / 6 cols for lg / md / sm).
     /// Intentional size-class collapse at narrow breakpoints: at md, small==medium (5)
     /// and large==full (10); at sm, medium/large/full all == 6 (full width). So some
-    /// of the LLM's size emphasis is deliberately flattened on smaller windows.
+    /// of the plan's size emphasis is deliberately flattened on smaller windows.
     private static func span(_ size: WidgetSize, _ bp: String) -> Int {
         switch size {
         case .small:  return bp == "lg" ? 3 : (bp == "md" ? 5 : 3)

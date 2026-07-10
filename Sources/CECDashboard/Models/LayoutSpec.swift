@@ -16,14 +16,14 @@ struct GridRect: Codable {
     let h: Int
 }
 
-/// One widget's identity + responsive placement (the LLM-generated part).
+/// One widget's identity + responsive placement (packed from a builder's plan).
 struct LayoutWidget: Codable, Identifiable {
     let id: String
     let type: WidgetType
     let layouts: [String: GridRect]   // breakpoint name -> rect
 }
 
-/// The full responsive layout spec. This is exactly what `claude -p` will emit
+/// The full responsive layout spec, packed by `Packer` from a builder's plan
 /// in M2; for M0 it's decoded from MockData.
 struct LayoutSpec: Codable {
     let breakpoints: [String: Int]    // name -> min width

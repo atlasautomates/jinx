@@ -1,9 +1,11 @@
 # Lead Dashboard
 
-Native macOS (SwiftUI) dashboard for Supabase lead data. An LLM picks an adaptive
-layout; SwiftUI renders it deterministically. See `BUILD_PLAN.md` for the full plan.
+Native macOS (SwiftUI) dashboard for Supabase lead data — three tabs (Leads,
+Campaigns, Pipeline), each a deterministic fetch → compose → build over read-only
+anon queries. See `BUILD_PLAN.md` for history.
 
-**Status: M0** — renderer + house design system, all mock data (no Supabase, no LLM).
+**Status:** live on Supabase; the M2 adaptive (Haiku) layout was removed in the
+P1 renovation (2026-07) in favor of fixed deterministic layouts on every tab.
 
 ## Run
 

@@ -1,6 +1,6 @@
 import Foundation
 
-/// The constrained "layout plan" the LLM emits in M2 — semantic choices only
+/// The constrained "layout plan" each tab's builder constructs — semantic choices only
 /// (which widgets, emphasis, order), never grid geometry. `Packer` deterministically
 /// expands a plan into the `LayoutSpec` the renderer consumes, so a small model
 /// cannot produce an invalid grid (overlaps / out-of-bounds are impossible).

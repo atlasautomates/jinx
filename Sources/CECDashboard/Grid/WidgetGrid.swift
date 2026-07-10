@@ -22,7 +22,7 @@ struct WidgetGrid: View {
         let colW = max((width - gap * CGFloat(cols - 1)) / CGFloat(cols), 1)
 
         // Resolve + sanitize each placed widget for the active breakpoint, so
-        // degenerate LLM-supplied geometry (M2) can't render silently broken tiles.
+        // degenerate plan geometry can't render silently broken tiles.
         let placed: [Placed] = layout.widgets.compactMap { widget in
             guard let rect = widget.layouts[bp], let data = widgets[widget.id] else { return nil }
             return Placed(id: widget.id, rect: Self.sanitize(rect, cols: cols), data: data)

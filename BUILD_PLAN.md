@@ -152,6 +152,13 @@ The template uses a 12-col `react-grid-layout` with `rowHeight: 80` and free
 
 ---
 
+> **SUPERSEDED (P1 renovation, 2026-07-09):** the adaptive Haiku layout engine
+> described in this section (LayoutEngine/LayoutResolver/LayoutCache/DataProfile,
+> the Re-layout button, the Application Support layout cache) was REMOVED.
+> Every tab now builds a fixed deterministic `LayoutPlan` inline
+> (`DashboardBuilder.build`, like CampaignBuilder/PipelineBuilder). This section
+> is kept as history only — do not verify against it.
+
 ## 6. Inference layer — M2 adaptive layout (Haiku, cache-gated)
 
 **Decided 2026-06-23.** Model = **Haiku 4.5** (cheapest; the task is constrained

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Hardcoded layout + widget data for the M0 spike (no Supabase, no LLM yet).
-/// Decoded through the same Codable contract `claude -p` will target in M2.
+/// Hardcoded layout + widget data for the M0 spike (no Supabase).
+/// Decoded through the same Codable contract the live dashboards use.
 enum MockData {
     static let dashboard: Dashboard? = Dashboard.decode(
         layoutJSON: layoutJSON,

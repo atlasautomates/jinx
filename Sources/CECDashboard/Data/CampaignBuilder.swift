@@ -1,9 +1,8 @@
 import Foundation
 
 /// Deterministically turns campaign inputs into a `Dashboard` (layout + widget data).
-/// Mirrors `DashboardBuilder`, but builds the `LayoutPlan` itself (one funnel board per
-/// campaign) rather than going through the Haiku layout engine — the campaigns MVP uses
-/// a fixed, deterministic layout. (Adaptive layout via `LayoutEngine` is a later add-on.)
+/// Builds its `LayoutPlan` inline (one funnel board per campaign) — every tab uses a
+/// fixed, deterministic layout (the Haiku layout engine was removed in the P1 renovation).
 enum CampaignBuilder {
 
     /// Canonical funnel order + color for campaign_leads.status values.

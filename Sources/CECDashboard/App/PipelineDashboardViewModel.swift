@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// Owns the Pipeline tab's async state. Mirrors `CampaignDashboardViewModel`
-/// (deterministic layout, no Haiku): fetch → compose → build, with the same
+/// (deterministic layout): fetch → compose → build, with the same
 /// loading / loaded / stale / failed semantics — never a silent blank.
 ///
 /// Adds `hasRunningRun`, which RootView's pipeline poll loop reads to switch

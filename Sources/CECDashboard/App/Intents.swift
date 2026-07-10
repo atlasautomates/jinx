@@ -106,7 +106,7 @@ struct LeadBreakdownIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let repo = try await makeRepository()
-        let result: (counts: [String: Int], sampled: Bool)
+        let result: (counts: [String: Int], sampled: Bool, incomplete: Bool)
         do { result = try await Self.counts(for: dimension, repo: repo) }
         catch { throw CECDashboardIntentError.fetchFailed }
 
@@ -114,18 +114,25 @@ struct LeadBreakdownIntent: AppIntent {
         let spoken = LeadAnswers.breakdown(result.counts,
                                            singular: dimension.spokenSingular,
                                            plural: dimension.spokenPlural,
-                                           sampled: result.sampled)
+                                           sampled: result.sampled,
+                                           incomplete: result.incomplete)
         return .result(dialog: IntentDialog(stringLiteral: spoken))
     }
 
-    private static func counts(for dim: LeadBreakdownDimension, repo: LeadsRepository) async throws -> (counts: [String: Int], sampled: Bool) {
+    private static func counts(
+        for dim: LeadBreakdownDimension, repo: LeadsRepository
+    ) async throws -> (counts: [String: Int], sampled: Bool, incomplete: Bool) {
         switch dim {
         case .tier:
-            return (await repo.tierCounts(), false)
+            // A degraded/floored tier read must not be spoken as exact.
+            let r = await repo.tierCountsResult()
+            return (r.counts, false, !r.ok)
         case .source:
-            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.leadSource }
+            let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.leadSource }
+            return (r.counts, r.sampled, false)
         case .industry:
-            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
+            let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
+            return (r.counts, r.sampled, false)
         }
     }
 }

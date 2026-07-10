@@ -10,7 +10,7 @@ struct Dashboard {
     /// Fail-closed only where it must: a missing/malformed layout returns nil (nothing
     /// to place). Widgets decode **independently** — one bad widget (unknown type,
     /// missing field) is dropped and logged, not allowed to blank the whole dashboard.
-    /// This matters for the M2 `claude -p` source, where partial/imperfect output is
+    /// This matters for any decoded source, where partial/imperfect output is
     /// the expected steady state; the grid already tolerates a widget with no data.
     static func decode(layoutJSON: String, widgetsJSON: String) -> Dashboard? {
         let decoder = JSONDecoder()

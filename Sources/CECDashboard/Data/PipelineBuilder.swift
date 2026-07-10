@@ -1,7 +1,7 @@
 import Foundation
 
 /// Deterministically turns pipeline inputs into a `Dashboard` (mirrors
-/// `CampaignBuilder` — fixed layout, no Haiku). `now` is injected so the
+/// `CampaignBuilder` — fixed deterministic layout). `now` is injected so the
 /// 7-day KPI window is SelfTest-pinnable.
 enum PipelineBuilder {
 

@@ -1,36 +1,48 @@
 import Foundation
 
 /// Deterministically turns lead rows into a `Dashboard` (layout + widget data).
-///
-/// Widget *data* is derived from live leads here; the *layout* comes from a
-/// `LayoutPlan` packed by `Packer` (M2). Pure/synchronous and side-effect free so it's
-/// trivially testable and the UI layer stays declarative.
+/// Builds its own `LayoutPlan` inline (like `CampaignBuilder`/`PipelineBuilder`) —
+/// the Haiku layout engine was removed (P1 renovation): same data now always
+/// renders the same arrangement. Pure/synchronous and side-effect free.
 enum DashboardBuilder {
 
-    /// The data series `widgetData` produces — the ONLY binds a plan may reference.
-    /// Single source of truth for prompt generation (step C) and bind validation.
-    /// Must stay in sync with the keys returned by `widgetData(_:)`.
+    /// The data series `widgetData` produces. Kept as a drift guard: the selftest
+    /// asserts these match `widgetData(_:)`'s keys exactly.
     static let availableBinds: Set<String> = [
         "total-leads", "by-source", "by-industry", "by-tier", "sentiment-mix",
         "added-weekly", "recent-leads",
     ]
 
-    /// Compose a dashboard from a (cached or LLM-generated) plan + the fetched inputs.
-    static func compose(_ inputs: DashboardInputs, plan: LayoutPlan) -> Dashboard {
-        Dashboard(layout: Packer.pack(plan), widgets: widgetData(inputs))
-    }
-
-    /// Convenience: compose with the deterministic default plan (no LLM). Used by the
-    /// selftest's data assertions and as a plain fallback.
+    /// Hand-designed fixed layout. Supplementary boards (tier/sentiment) appear
+    /// only when their table returned data — an empty board is noise, not signal.
+    /// (`recent-leads` stays a widget until the native clickable list replaces it
+    /// in the profile phase.)
     static func build(_ inputs: DashboardInputs) -> Dashboard {
-        compose(inputs, plan: DefaultLayout.plan)
+        var planned: [PlannedWidget] = []
+        var priority = 0
+        func next() -> Int { priority += 1; return priority }
+
+        planned.append(PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: next()))
+        planned.append(PlannedWidget(type: .statusBoard, bind: "by-source", size: .medium, priority: next()))
+        planned.append(PlannedWidget(type: .statusBoard, bind: "by-industry", size: .medium, priority: next()))
+        if !inputs.tierCounts.isEmpty {
+            planned.append(PlannedWidget(type: .statusBoard, bind: "by-tier", size: .medium, priority: next()))
+        }
+        if !inputs.sentimentCounts.isEmpty {
+            planned.append(PlannedWidget(type: .statusBoard, bind: "sentiment-mix", size: .medium, priority: next()))
+        }
+        planned.append(PlannedWidget(type: .chart, bind: "added-weekly", size: .large, priority: next()))
+        planned.append(PlannedWidget(type: .table, bind: "recent-leads", size: .full, priority: next()))
+
+        return Dashboard(layout: Packer.pack(LayoutPlan(widgets: planned)),
+                         widgets: widgetData(inputs))
     }
 
     // MARK: - Widget data
 
     /// The per-widget data keyed by bind id. Tier/sentiment come from supplementary
-    /// tables — empty (no data / no RLS) renders an empty board, but the profile gives
-    /// them strength "none" so the LLM won't bind them.
+    /// tables — empty (no data / no RLS) renders an empty board (and `build` skips
+    /// planning it).
     static func widgetData(_ inputs: DashboardInputs) -> [String: WidgetData] {
         let leads = inputs.leads
         // The leads breakdowns are computed over the fetched window; when that window is
@@ -44,7 +56,7 @@ enum DashboardBuilder {
             "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
             "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope),
-            "recent-leads": recentLeadsTable(leads),
+            "recent-leads": recentLeadsTable(leads, partial: inputs.partial),
         ]
     }
 
@@ -145,7 +157,7 @@ enum DashboardBuilder {
     }
 
     /// Most-recent leads (already ordered by created_at desc from the query).
-    private static func recentLeadsTable(_ leads: [LeadRow]) -> WidgetData {
+    private static func recentLeadsTable(_ leads: [LeadRow], partial: Bool = false) -> WidgetData {
         let columns = [
             TableColumn(key: "company", label: "Company", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "industry", label: "Industry", sortable: nil, format: nil, variant: nil),
@@ -170,7 +182,10 @@ enum DashboardBuilder {
                 "added": .string(added),
             ]
         }
-        return .table(TableData(title: "Recent Leads", columns: columns, rows: rows))
+        let title = partial
+            ? "Recent Leads (partial data — some breakdowns may be missing)"
+            : "Recent Leads"
+        return .table(TableData(title: title, columns: columns, rows: rows))
     }
 }
 
