@@ -34,12 +34,17 @@ enum SupabaseCheck {
                 async let runsTask = pipeRepo.recentRuns()
                 async let eventsTask: [PipelineLeadEventRow]? = try? pipeRepo.leadEvents(
                     leadId: "00000000-0000-0000-0000-000000000000") // shape/RLS probe; expect []
+                // P3: the profile's conversation timeline needs anon SELECT on
+                // lead_interactions (migration lead_interactions_anon_read).
+                let profileRepo = ProfileRepository(client: client)
+                async let interactionsTask = profileRepo.fetchProbe()
 
                 let leadsProbe = try await leadsProbeTask           // essential
                 let tiers = await tiersTask
                 let sentiment = await sentimentTask
                 let runs = (try? await runsTask) ?? []
                 let events = await eventsTask
+                let interactionsOK = await interactionsTask
                 // Stage read depends on run ids — the one sequential follow-up.
                 let (stageRows, stagesOK) = await pipeRepo.stageRuns(
                     runIds: runs.prefix(3).map(\.runId))
@@ -52,6 +57,8 @@ enum SupabaseCheck {
                     + (stagesOK ? "" : " (stage read FAILED)")
                     + (events == nil ? ", lead_events read FAILED (no RLS policy?)" : ", lead_events readable")
                     + (runs.isEmpty ? " — EMPTY (no runs / no RLS policy on pipeline_runs)" : "")
+                    + (interactionsOK ? ", lead_interactions readable"
+                       : ", lead_interactions read FAILED (missing lead_interactions_anon_read migration?)")
                 result.message = "reached \(client.baseURL.host ?? "supabase"), "
                     + "\(leadsProbe.count) lead(s) sampled (full select incl. enrichment_stage)"
                     + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)"

@@ -56,9 +56,10 @@ enum SelfTest {
         ]
         let built = DashboardBuilder.build(DashboardInputs(leads: sampleLeads, totalCount: 720))
         // Deterministic plan: tier/sentiment boards are skipped when their
-        // supplementary counts are empty (empty board = noise).
+        // supplementary counts are empty (empty board = noise); recent-leads is
+        // the native list below the grid now (P3), not a widget.
         if Set(built.layout.widgets.map { $0.id })
-            != ["total-leads", "by-source", "by-industry", "added-weekly", "recent-leads"] {
+            != ["total-leads", "by-source", "by-industry", "added-weekly"] {
             problems.append("builder: unexpected widget ids (\(built.layout.widgets.map { $0.id }.sorted()))")
         }
         problems.append(contentsOf: validateGrid(built.layout, label: "leads-build"))
@@ -70,9 +71,6 @@ enum SelfTest {
             if summed != sampleLeads.count { problems.append("builder: source counts (\(summed)) != lead count") }
         } else {
             problems.append("builder: by-source is not a status board")
-        }
-        if case .table(let table)? = built.widgets["recent-leads"], table.rows.count != sampleLeads.count {
-            problems.append("builder: table row count (\(table.rows.count)) != lead count")
         }
         // The row with nil createdAt must not crash the weekly chart; ≤2 weeks present.
         if case .chart(let chart)? = built.widgets["added-weekly"], chart.points.count > 8 {
@@ -170,6 +168,9 @@ enum SelfTest {
             problems.append("answers: sampled qualifier missing")
         }
 
+        // ── Lead profile: ProfileRepository.compose (P3) ────────────────────────────
+        problems.append(contentsOf: profileComposeChecks())
+
         // ── Campaigns tab: CampaignsRepository.compose + CampaignBuilder ────────────
         // The compose path is pure (no I/O), so we exercise the join/binding edge cases
         // here rather than against the live DB.
@@ -202,19 +203,20 @@ enum SelfTest {
         if clean.sentimentCounts["positive"] != 2 || !clean.tierCounts.isEmpty {
             problems.append("leads-compose: counts not packaged through")
         }
-        if case .table(let t)? = DashboardBuilder.build(clean).widgets["recent-leads"],
-           t.title.contains("partial") {
-            problems.append("leads-compose: clean load must not title the table partial")
+        if case .chart(let c)? = DashboardBuilder.build(clean).widgets["added-weekly"],
+           c.title.contains("partial") {
+            problems.append("leads-compose: clean load must not title the chart partial")
         }
 
-        // A failed supplementary read → partial, surfaced in the table title.
+        // A failed supplementary read → partial, surfaced in the chart title
+        // (the partial signal moved there when recent-leads left the grid, P3).
         let degraded = LeadsRepository.compose(
             leads: sampleLeads, totalCount: 10,
             tiers: ([:], ok: false), sentiment: ([:], ok: true))
         if !degraded.partial { problems.append("leads-compose: failed tier read must mark partial") }
-        if case .table(let t)? = DashboardBuilder.build(degraded).widgets["recent-leads"],
-           !t.title.contains("partial") {
-            problems.append("leads-compose: partial must surface in the recent-leads title")
+        if case .chart(let c)? = DashboardBuilder.build(degraded).widgets["added-weekly"],
+           !c.title.contains("partial") {
+            problems.append("leads-compose: partial must surface in the added-weekly title")
         }
 
         // tally (the paged read's pure page parser): an unparseable 2xx body must
@@ -247,6 +249,140 @@ enum SelfTest {
             problems.append("leads-voice: a clean tally must not carry the incomplete caveat")
         }
 
+        return problems
+    }
+
+    /// Exercises the profile compose seam (P3): timeline chronology, sentiment/
+    /// intent from the LATEST inbound row's metadata, partial semantics, and
+    /// the empty-timeline path.
+    private static func profileComposeChecks() -> [String] {
+        var problems: [String] = []
+        let lead = LeadDetailRow(id: "L1", email: "a@b.c", firstName: "Ana",
+                                 lastName: "Diaz", fullName: nil, companyName: "Acme",
+                                 jobTitle: nil, companyDescription: nil, location: nil,
+                                 city: nil, state: nil, phone: nil, website: nil,
+                                 industry: nil)
+        func interaction(_ at: String?, direction: String,
+                         sentiment: String? = nil) -> LeadInteractionRow {
+            LeadInteractionRow(
+                interactionType: "email", direction: direction, subject: "s",
+                summary: nil, transcript: nil,
+                metadata: sentiment.map { .object(["sentiment": .string($0),
+                                                   "intent": .string("question")]) },
+                source: nil, interactionAt: at)
+        }
+
+        // Sentiment comes from the LATEST inbound row; outbound rows and older
+        // inbound sentiments are ignored. Out-of-order input gets re-sorted.
+        let composed = ProfileRepository.compose(
+            lead: lead,
+            enrichment: (nil, ok: true),
+            interactions: ([
+                interaction("2026-07-02T10:00:00+00:00", direction: "inbound", sentiment: "negative"),
+                interaction("2026-07-01T10:00:00+00:00", direction: "outbound"),
+                interaction("2026-07-03T10:00:00+00:00", direction: "inbound", sentiment: "positive"),
+                interaction("2026-07-04T10:00:00+00:00", direction: "outbound"),
+            ], ok: true))
+        if composed.sentiment != "positive" || composed.intent != "question" {
+            problems.append("profile: sentiment must come from the LATEST inbound row "
+                + "(got \(String(describing: composed.sentiment)))")
+        }
+        if composed.interactions.map(\.interactionAt) !=
+            ["2026-07-01T10:00:00+00:00", "2026-07-02T10:00:00+00:00",
+             "2026-07-03T10:00:00+00:00", "2026-07-04T10:00:00+00:00"] {
+            problems.append("profile: timeline must be chronological")
+        }
+        if composed.partial { problems.append("profile: ok reads must not mark partial") }
+        if composed.lead.displayName != "Ana Diaz" {
+            problems.append("profile: displayName should join first+last (got \(composed.lead.displayName))")
+        }
+
+        // A failed supplementary read marks partial; empty timeline never crashes.
+        let degraded = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: false), interactions: ([], ok: true))
+        if !degraded.partial { problems.append("profile: failed enrichment must mark partial") }
+        if degraded.sentiment != nil { problems.append("profile: empty timeline must yield nil sentiment") }
+        let failedTimeline = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true), interactions: ([], ok: false))
+        if !failedTimeline.interactionsFailed || !failedTimeline.partial {
+            problems.append("profile: failed interactions read must set interactionsFailed + partial")
+        }
+
+        // PRODUCTION SHAPE (QA live finding): metadata jsonb is DOUBLE-ENCODED —
+        // a JSON string, not an object. meta() must decode it or the sentiment
+        // badge is dead against every real lead.
+        let doubleEncoded = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true),
+            interactions: ([LeadInteractionRow(
+                interactionType: "email", direction: "inbound", subject: nil,
+                summary: nil, transcript: nil,
+                metadata: .string(#"{"sentiment": "positive", "intent": "interested"}"#),
+                source: nil, interactionAt: "2026-07-01T10:00:00+00:00")], ok: true))
+        if doubleEncoded.sentiment != "positive" || doubleEncoded.intent != "interested" {
+            problems.append("profile: double-encoded metadata must decode "
+                + "(got \(String(describing: doubleEncoded.sentiment)))")
+        }
+
+        // Metadata that is garbage / non-object stays harmless.
+        let noMeta = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true),
+            interactions: ([LeadInteractionRow(
+                interactionType: "email", direction: "inbound", subject: nil,
+                summary: nil, transcript: nil, metadata: .string("oops"),
+                source: nil, interactionAt: "t")], ok: true))
+        if noMeta.sentiment != nil {
+            problems.append("profile: non-object metadata must not fabricate sentiment")
+        }
+
+        // Chronology is by PARSED date: mixed Z / +00:00 / fractional formats
+        // and a nil timestamp must still order correctly (nil sinks first).
+        let mixed = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true),
+            interactions: ([
+                interaction("2026-07-02T10:00:00Z", direction: "outbound"),
+                interaction(nil, direction: "outbound"),
+                interaction("2026-07-01T10:00:00.500+00:00", direction: "inbound", sentiment: "neutral"),
+                interaction("2026-07-03T09:59:59+00:00", direction: "inbound", sentiment: "positive"),
+            ], ok: true))
+        if mixed.interactions.map(\.interactionAt) !=
+            [nil, "2026-07-01T10:00:00.500+00:00", "2026-07-02T10:00:00Z",
+             "2026-07-03T09:59:59+00:00"] {
+            problems.append("profile: mixed-format timeline must sort by parsed date "
+                + "(got \(mixed.interactions.map { $0.interactionAt ?? "nil" }))")
+        }
+        if mixed.sentiment != "positive" {
+            problems.append("profile: mixed-format latest inbound wrong")
+        }
+
+        // Truncation: cap+1 rows → newest cap kept (OLDEST trimmed), flag set;
+        // exactly cap rows → no flag (the +1 probe kills the false positive).
+        let cap = ProfileRepository.interactionsCap
+        func stamped(_ i: Int) -> LeadInteractionRow {
+            interaction(String(format: "2026-01-01T%02d:%02d:%02d+00:00",
+                               (i / 3600) % 24, (i / 60) % 60, i % 60),
+                        direction: "outbound")
+        }
+        let overCap = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true),
+            interactions: ((0...cap).map(stamped), ok: true))   // cap+1 rows
+        if !overCap.interactionsTruncated || overCap.interactions.count != cap {
+            problems.append("profile: cap+1 rows must trim to newest cap + flag truncated")
+        }
+        if overCap.interactions.first?.interactionAt == stamped(0).interactionAt {
+            problems.append("profile: truncation must drop the OLDEST row, not the newest")
+        }
+        let atCap = ProfileRepository.compose(
+            lead: lead, enrichment: (nil, ok: true),
+            interactions: ((1...cap).map(stamped), ok: true))   // exactly cap
+        if atCap.interactionsTruncated {
+            problems.append("profile: exactly-cap rows must NOT flag truncated")
+        }
+
+        // The filter-char sanitizer keeps UUIDs intact and strips injection chars.
+        if ProfileRepository.sanitized("abc-123") != "abc-123"
+            || ProfileRepository.sanitized("x,y(z)\"") != "xyz" {
+            problems.append("profile: id sanitizer wrong")
+        }
         return problems
     }
 

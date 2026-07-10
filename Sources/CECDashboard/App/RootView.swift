@@ -5,6 +5,9 @@ struct RootView: View {
     @State private var campaignModel = CampaignDashboardViewModel()
     @State private var pipelineModel = PipelineDashboardViewModel()
     @State private var inspectorModel = LeadInspectorModel()
+    // One profile seam for every tab: rows set `presenter.active`, this view
+    // presents the sheet (P3).
+    @State private var profilePresenter = ProfilePresenter()
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
@@ -20,6 +23,14 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .frame(minWidth: 820, minHeight: 600)
+        .environment(profilePresenter)
+        .sheet(item: Bindable(profilePresenter).active) { ref in
+            // Explicit injection: sheet content is a separate presentation
+            // host — never rely on cross-boundary environment inheritance
+            // (platform review; P5's pin button consumes the presenter).
+            LeadProfileView(ref: ref)
+                .environment(profilePresenter)
+        }
         .background(WindowAccessor { titlebarHover.attach(to: $0) })
         .task { await model.load() }            // initial Leads load
         .task { await campaignModel.load() }    // initial Campaigns load
@@ -65,18 +76,26 @@ struct RootView: View {
         case .idle, .loading:
             LoadingView()
         case .loaded(let dashboard):
-            DashboardShell(
-                dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
-                onRefresh: { Task { await model.load() } }
-            )
+            leadsSplit(dashboard: dashboard, staleMessage: nil)
         case .stale(let dashboard, _, let message):
-            DashboardShell(
-                dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
-                staleMessage: message,
-                onRefresh: { Task { await model.load() } }
-            )
+            leadsSplit(dashboard: dashboard, staleMessage: message)
         case .failed(let message):
             ErrorView(message: message, onRetry: { Task { await model.load() } })
+        }
+    }
+
+    /// Widget grid on top, native clickable recent-leads list below (P3) —
+    /// same VSplitView shape as the Pipeline tab's dashboard/inspector split.
+    private func leadsSplit(dashboard: Dashboard, staleMessage: String?) -> some View {
+        VSplitView {
+            DashboardShell(
+                dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
+                staleMessage: staleMessage,
+                onRefresh: { Task { await model.load() } }
+            )
+            .frame(minHeight: 260)
+            RecentLeadsList(leads: model.recentLeads)
+                .frame(minHeight: 160, idealHeight: 240)
         }
     }
 

@@ -8,6 +8,9 @@ import Observation
 @Observable
 final class DashboardViewModel {
     private(set) var state: Loadable<Dashboard> = .idle
+    /// The fetched lead rows behind the dashboard — feeds the native clickable
+    /// RecentLeadsList (P3), which replaced the recent-leads table widget.
+    private(set) var recentLeads: [LeadRow] = []
     /// True while a `load()` is in flight — drives the Refresh button's disabled state.
     private(set) var isRefreshing = false
 
@@ -29,6 +32,7 @@ final class DashboardViewModel {
             let client = try SupabaseClient.make()
             let repo = LeadsRepository(client: client)
             let inputs = try await repo.fetch()
+            recentLeads = inputs.leads
             state = .loaded(DashboardBuilder.build(inputs))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

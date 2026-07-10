@@ -10,13 +10,13 @@ enum DashboardBuilder {
     /// asserts these match `widgetData(_:)`'s keys exactly.
     static let availableBinds: Set<String> = [
         "total-leads", "by-source", "by-industry", "by-tier", "sentiment-mix",
-        "added-weekly", "recent-leads",
+        "added-weekly",
     ]
 
     /// Hand-designed fixed layout. Supplementary boards (tier/sentiment) appear
     /// only when their table returned data — an empty board is noise, not signal.
-    /// (`recent-leads` stays a widget until the native clickable list replaces it
-    /// in the profile phase.)
+    /// (The recent-leads table left the grid in P3: it's now the native
+    /// clickable `RecentLeadsList` below the grid.)
     static func build(_ inputs: DashboardInputs) -> Dashboard {
         var planned: [PlannedWidget] = []
         var priority = 0
@@ -32,7 +32,6 @@ enum DashboardBuilder {
             planned.append(PlannedWidget(type: .statusBoard, bind: "sentiment-mix", size: .medium, priority: next()))
         }
         planned.append(PlannedWidget(type: .chart, bind: "added-weekly", size: .large, priority: next()))
-        planned.append(PlannedWidget(type: .table, bind: "recent-leads", size: .full, priority: next()))
 
         return Dashboard(layout: Packer.pack(LayoutPlan(widgets: planned)),
                          widgets: widgetData(inputs))
@@ -49,14 +48,17 @@ enum DashboardBuilder {
         // smaller than the true total, say so in the title (the KPI alone is exact).
         let windowed = inputs.totalCount > leads.count
         let scope = windowed ? " (latest \(leads.count) of \(inputs.totalCount))" : ""
+        // The partial (degraded supplementary read) signal rides the chart title
+        // now that the recent-leads table left the grid (P3).
+        let partialNote = inputs.partial
+            ? " (partial data — some breakdowns may be missing)" : ""
         return [
             "total-leads": totalLeadsKPI(inputs.totalCount),
             "by-source": bySourceBoard(leads, titleSuffix: scope),
             "by-industry": byIndustryBoard(leads, titleSuffix: scope),
             "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
             "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
-            "added-weekly": addedWeeklyChart(leads, titleSuffix: scope),
-            "recent-leads": recentLeadsTable(leads, partial: inputs.partial),
+            "added-weekly": addedWeeklyChart(leads, titleSuffix: scope + partialNote),
         ]
     }
 
@@ -156,37 +158,6 @@ enum DashboardBuilder {
         return .chart(ChartData(title: "Leads Added / Week" + titleSuffix, kind: .line, points: points))
     }
 
-    /// Most-recent leads (already ordered by created_at desc from the query).
-    private static func recentLeadsTable(_ leads: [LeadRow], partial: Bool = false) -> WidgetData {
-        let columns = [
-            TableColumn(key: "company", label: "Company", sortable: nil, format: nil, variant: nil),
-            TableColumn(key: "industry", label: "Industry", sortable: nil, format: nil, variant: nil),
-            TableColumn(key: "source", label: "Source", sortable: nil, format: nil, variant: "badge"),
-            TableColumn(key: "stage", label: "Stage", sortable: nil, format: nil, variant: "badge"),
-            TableColumn(key: "location", label: "Location", sortable: nil, format: nil, variant: nil),
-            TableColumn(key: "added", label: "Added", sortable: nil, format: nil, variant: nil),
-        ]
-        let dayFmt = DateFormatter()
-        dayFmt.locale = Locale(identifier: "en_US_POSIX")
-        dayFmt.dateFormat = "MMM d, yyyy"
-
-        let rows: [[String: CellValue]] = leads.prefix(25).map { lead in
-            let location = [lead.city, lead.state].compactMap { $0?.nilIfEmpty }.joined(separator: ", ")
-            let added = DateParse.iso(lead.createdAt).map { dayFmt.string(from: $0) } ?? "—"
-            return [
-                "company": .string(lead.companyName?.nilIfEmpty ?? "Unknown"),
-                "industry": .string(lead.industry?.nilIfEmpty ?? "—"),
-                "source": .string(lead.leadSource?.nilIfEmpty ?? "—"),
-                "stage": .string(lead.enrichmentStage?.nilIfEmpty ?? "—"),
-                "location": .string(location.isEmpty ? "—" : location),
-                "added": .string(added),
-            ]
-        }
-        let title = partial
-            ? "Recent Leads (partial data — some breakdowns may be missing)"
-            : "Recent Leads"
-        return .table(TableData(title: title, columns: columns, rows: rows))
-    }
 }
 
 // MARK: - Helpers

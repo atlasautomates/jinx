@@ -100,6 +100,7 @@ final class LeadInspectorModel {
 
 struct LeadInspectorView: View {
     @Bindable var model: LeadInspectorModel
+    @Environment(ProfilePresenter.self) private var presenter
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -153,8 +154,18 @@ struct LeadInspectorView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
                 if let lead = model.selected {
-                    Text("\(lead.companyName?.nilIfEmpty ?? "Unknown company") — journey (\(model.events.count) events)")
-                        .font(.headline)
+                    HStack(spacing: 8) {
+                        Text("\(lead.companyName?.nilIfEmpty ?? "Unknown company") — journey (\(model.events.count) events)")
+                            .font(.headline)
+                        Spacer()
+                        // The journey shows WHAT HAPPENED; the profile shows
+                        // WHO THEY ARE (dossier + conversation) — P3.
+                        Button("View full profile") {
+                            presenter.active = LeadRef(id: lead.id,
+                                                       companyName: lead.companyName,
+                                                       email: lead.email)
+                        }
+                    }
                 }
                 if model.eventsTruncated {
                     Text("Showing the most recent \(PipelineRepository.inspectorEventsCap) events — older history omitted.")
