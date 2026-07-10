@@ -5,6 +5,46 @@ import Foundation
 /// 7-day KPI window is SelfTest-pinnable.
 enum PipelineBuilder {
 
+    /// Human name + demoted hex for one run. `primary` is what people read
+    /// ("biotech-europe · Jul 9 · running"); `hex` is the 8-char run_id prefix,
+    /// kept as a secondary identifier for cross-referencing `ce status`.
+    struct RunLabel: Equatable {
+        let primary: String
+        let hex: String
+    }
+
+    private static let labelDayFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        // UTC: the label names the run's LEDGER day (deterministic, selftest-
+        // pinnable), matching ce status; the table's "Started" column stays local.
+        f.timeZone = TimeZone(identifier: "UTC") ?? f.timeZone
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
+    /// The run's human NAME: its vertical, or — for ledger stage-script runs,
+    /// which carry vertical=NULL and kind="stage" — an honest "standalone
+    /// <kind>" instead of a bare hex. Single source for the table, funnel
+    /// title, and inspector trailers.
+    static func runName(vertical: String?, kind: String?) -> String {
+        vertical?.nilIfEmpty ?? "standalone \(kind?.nilIfEmpty ?? "run")"
+    }
+
+    /// Pure formatter (SelfTest-pinned). Missing/unparseable date → "—".
+    static func runLabel(runId: String, vertical: String?, kind: String?,
+                         startedAt: String?, status: String?) -> RunLabel {
+        let day = DateParse.iso(startedAt).map { labelDayFmt.string(from: $0) } ?? "—"
+        let state = status?.nilIfEmpty ?? "unknown"
+        return RunLabel(primary: "\(runName(vertical: vertical, kind: kind)) · \(day) · \(state)",
+                        hex: String(runId.prefix(8)))
+    }
+
+    static func runLabel(_ run: PipelineRunRow) -> RunLabel {
+        runLabel(runId: run.runId, vertical: run.vertical, kind: run.kind,
+                 startedAt: run.startedAt, status: run.status)
+    }
+
     /// Canonical color per run/stage status.
     static func statusColor(_ status: String?) -> String {
         switch (status ?? "").lowercased() {
@@ -91,7 +131,7 @@ enum PipelineBuilder {
                                count: s.countOut ?? s.countIn ?? 0,
                                status: statusColor(s.status))
         }
-        let title = "Latest Run — \(run.vertical ?? "?") [\(run.status ?? "?")]"
+        let title = "Latest Run — \(runLabel(run).primary)"
         return .statusBoard(StatusBoardData(title: title, groups: groups))
     }
 
@@ -129,14 +169,17 @@ enum PipelineBuilder {
     private static func runsTable(_ runs: [PipelineRunRow],
                                   stagesByRun: [String: [PipelineStageRow]],
                                   partial: Bool) -> WidgetData {
+        // Humanized (P2): the run's NAME leads (vertical, or "standalone <kind>"
+        // for ledger stage-script runs); the hex run_id is demoted to a trailing
+        // ID column for cross-referencing `ce status <id>`.
         let columns = [
             TableColumn(key: "run", label: "Run", sortable: nil, format: nil, variant: nil),
-            TableColumn(key: "vertical", label: "Vertical", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "kind", label: "Kind", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "status", label: "Status", sortable: nil, format: nil, variant: "badge"),
             TableColumn(key: "started", label: "Started", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "duration", label: "Duration", sortable: nil, format: nil, variant: nil),
             TableColumn(key: "out", label: "Leads Out", sortable: nil, format: nil, variant: nil),
+            TableColumn(key: "id", label: "ID", sortable: nil, format: nil, variant: nil),
         ]
         let dayFmt = DateFormatter()
         dayFmt.locale = Locale(identifier: "en_US_POSIX")
@@ -149,14 +192,14 @@ enum PipelineBuilder {
             let stages = stagesByRun[run.runId] ?? []
             let out = stages.last(where: { $0.countOut != nil })?.countOut
             return [
-                "run": .string(String(run.runId.prefix(8))),
-                "vertical": .string(run.vertical?.nilIfEmpty ?? "—"),
+                "run": .string(runName(vertical: run.vertical, kind: run.kind)),
                 "kind": .string(run.kind?.nilIfEmpty ?? "—"),
                 "status": .string(run.status?.nilIfEmpty ?? "unknown"),
                 "started": .string(started),
                 "duration": .string(durationText(started: run.startedAt,
                                                  finished: run.finishedAt)),
                 "out": out.map { .number(Double($0)) } ?? .string("—"),
+                "id": .string(String(run.runId.prefix(8))),
             ]
         }
         let title = partial

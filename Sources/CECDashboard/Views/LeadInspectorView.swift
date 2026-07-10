@@ -13,6 +13,9 @@ final class LeadInspectorModel {
     private(set) var hits: [LeadSearchHit] = []
     private(set) var selected: LeadSearchHit?
     private(set) var events: [PipelineLeadEventRow] = []
+    /// Run rows keyed by run_id for the visible events — lets each card show
+    /// "vertical · date" instead of a bare hex. Cosmetic: misses fall back.
+    private(set) var runsById: [String: PipelineRunRow] = [:]
     private(set) var eventsTruncated = false
     private(set) var isSearching = false
     private(set) var isLoadingEvents = false
@@ -40,7 +43,12 @@ final class LeadInspectorModel {
         selectGeneration += 1
         selected = nil
         events = []
+        runsById = [:]
         eventsTruncated = false
+        // A superseded select()'s defer deliberately won't clear this (older
+        // generation) — the newer flow owns it, so reset here or the spinner
+        // leaks on search-supersedes-select (swift-semantics review).
+        isLoadingEvents = false
         do {
             let repo = PipelineRepository(client: try SupabaseClient.make())
             hits = try await repo.searchLeads(q)
@@ -58,6 +66,7 @@ final class LeadInspectorModel {
         // the previous lead's cards.
         selected = hit
         events = []
+        runsById = [:]
         eventsTruncated = false
         message = nil
         isLoadingEvents = true
@@ -71,6 +80,16 @@ final class LeadInspectorModel {
             if fetched.isEmpty {
                 message = "No pipeline events recorded for this lead (it may predate the run ledger)."
             }
+            // The events ARE the content — stop the spinner before the purely
+            // cosmetic run-name lookup, or a slow lookup shows a complete
+            // journey under a "still loading" spinner (reliability review).
+            isLoadingEvents = false
+            // Humanized trailers (P2): resolve the events' runs. Fail-open +
+            // generation-guarded — a stale lookup must not land under a newer
+            // selection, and a miss just leaves the hex fallback.
+            let runs = await repo.runsByIds(fetched.compactMap(\.runId))
+            guard generation == selectGeneration else { return }
+            runsById = runs
         } catch {
             guard generation == selectGeneration else { return }
             events = []
@@ -146,7 +165,8 @@ struct LeadInspectorView: View {
                 // model), and N nil-id rows would collapse to ONE card under
                 // Identifiable identity (swift-semantics review).
                 ForEach(model.events, id: \.stableKey) { event in
-                    LeadEventCard(event: event)
+                    LeadEventCard(event: event,
+                                  run: event.runId.flatMap { model.runsById[$0] })
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -160,6 +180,8 @@ struct LeadInspectorView: View {
 /// reading real values (openers, research, casualizations) without asking.
 private struct LeadEventCard: View {
     let event: PipelineLeadEventRow
+    /// The event's run, when the lookup resolved it — nil falls back to hex.
+    let run: PipelineRunRow?
 
     // Hoisted: DateFormatter init is expensive and headerTrailer runs per card
     // per body evaluation (code review). Main-actor-confined via the view.
@@ -206,10 +228,15 @@ private struct LeadEventCard: View {
     }
 
     private var headerTrailer: String {
-        let run = event.runId.map { String($0.prefix(8)) } ?? "—"
         let at = event.createdAt.flatMap(DateParse.iso)
             .map { Self.timeFmt.string(from: $0) } ?? "—"
-        return "run \(run) · \(at)"
+        // Humanized (P2): name the run like the runs table does; the event's
+        // own timestamp replaces the label's day (more precise here).
+        if let run {
+            return "\(PipelineBuilder.runName(vertical: run.vertical, kind: run.kind)) · \(at)"
+        }
+        let hex = event.runId.map { String($0.prefix(8)) } ?? "—"
+        return "run \(hex) · \(at)"
     }
 
     @ViewBuilder

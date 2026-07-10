@@ -130,6 +130,39 @@ struct PipelineRepository {
         return try JSONDecoder().decode([PipelineLeadEventRow].self, from: data).reversed()
     }
 
+    /// Run rows for a set of ids — the inspector uses this to humanize event
+    /// trailers ("biotech-europe · Jul 9" instead of a bare hex). Fail-open to
+    /// [:]: the label lookup is cosmetic and every caller falls back to the
+    /// hex prefix, so a miss must never fail the journey view.
+    func runsByIds(_ ids: [String]) async -> [String: PipelineRunRow] {
+        // Defense-in-depth: ids come from our own ledger rows, but they ride
+        // into an in.(...) filter — strip filter-syntax chars like searchLeads.
+        // prefix(200): kills the pathological 414 tail (300 distinct UUIDs ≈
+        // 11 KB query string); overflow ids simply keep their hex fallback.
+        let unique = Array(Set(ids.compactMap { id -> String? in
+            let cleaned = String(id.unicodeScalars.filter {
+                !",()\"\\ ".unicodeScalars.contains($0)
+            })
+            return cleaned.isEmpty ? nil : cleaned
+        }).prefix(200))
+        guard !unique.isEmpty else { return [:] }
+        do {
+            let data = try await client.get("pipeline_runs", [
+                URLQueryItem(name: "select",
+                             value: "run_id,kind,vertical,search_query,status,error,git_sha,started_at,finished_at"),
+                URLQueryItem(name: "run_id", value: "in.(\(unique.joined(separator: ",")))"),
+            ])
+            let rows = try JSONDecoder().decode([PipelineRunRow].self, from: data)
+            return Dictionary(rows.map { ($0.runId, $0) }) { first, _ in first }
+        } catch {
+            // Log like the sibling failOpen contract — a persistently failing
+            // lookup would otherwise be invisible ("labels never humanize").
+            NSLog("PipelineRepository.runsByIds failed (labels fall back to hex): %@",
+                  error.localizedDescription)
+            return [:]
+        }
+    }
+
     /// Run a supplementary read; any error logs + yields (rows: [], ok: false)
     /// so the caller can mark the load partial (same contract as Campaigns).
     private func failOpen<T>(_ body: () async throws -> [T]) async -> (rows: [T], ok: Bool) {

@@ -520,6 +520,41 @@ enum SelfTest {
             problems.append("pipeline: open-ended durations must render as —")
         }
 
+        // Humanized run labels (P2): name · day · status, with honest fallbacks.
+        let label = PipelineBuilder.runLabel(
+            runId: "58894ce1-0000", vertical: "biotech-europe", kind: "full",
+            startedAt: "2026-07-09T14:00:00+00:00", status: "running")
+        if label.primary != "biotech-europe · Jul 9 · running" || label.hex != "58894ce1" {
+            problems.append("pipeline: runLabel wrong (got \(label))")
+        }
+        // NULL vertical = a standalone stage-script run — named, never bare hex.
+        let standalone = PipelineBuilder.runLabel(
+            runId: "abcd1234-0000", vertical: nil, kind: "stage",
+            startedAt: nil, status: nil)
+        if standalone.primary != "standalone stage · — · unknown" {
+            problems.append("pipeline: NULL-vertical label wrong (got \(standalone.primary))")
+        }
+        if PipelineBuilder.runLabel(runId: "x", vertical: " ", kind: nil,
+                                    startedAt: "not-a-date", status: "ok").primary
+            != "standalone run · — · ok" {
+            problems.append("pipeline: blank vertical / bad date must fall back cleanly")
+        }
+        // The runs table leads with the human name and demotes hex to the ID column.
+        if case .table(let t)? = dash.widgets["runs-table"] {
+            if t.columns.first?.key != "run" || t.columns.last?.key != "id" {
+                problems.append("pipeline: runs-table must lead with Run and end with ID")
+            }
+            if t.rows.first?["run"]?.displayString != "toy"
+                || t.rows.first?["id"]?.displayString != "r1" {
+                problems.append("pipeline: runs-table row should name the run + demote hex")
+            }
+        }
+        // Funnel title uses the humanized label.
+        if case .statusBoard(let b)? = dash.widgets["latest-funnel"],
+           !b.title.contains("toy · Jul 8 · succeeded") {
+            problems.append("pipeline: funnel title should use the humanized label (got \(String(describing: (dash.widgets["latest-funnel"]))))")
+        }
+
         // Review-fix pins (P5 review round):
         // 1) Phantom-'running' liveness bound — a stale 'running' run must NOT
         //    count as live (it would pin the 8s poll cadence forever).
