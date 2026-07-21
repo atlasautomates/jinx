@@ -9,7 +9,7 @@ enum DashboardBuilder {
     /// The data series `widgetData` produces. Kept as a drift guard: the selftest
     /// asserts these match `widgetData(_:)`'s keys exactly.
     static let availableBinds: Set<String> = [
-        "total-leads", "by-source", "by-industry", "by-tier", "sentiment-mix",
+        "by-source", "by-industry", "by-status", "by-tier", "sentiment-mix",
         "added-weekly",
     ]
 
@@ -22,9 +22,11 @@ enum DashboardBuilder {
         var priority = 0
         func next() -> Int { priority += 1; return priority }
 
-        planned.append(PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: next()))
+        // The total-leads KPI left the grid (i-9f08): the exact total now renders as subtext
+        // under the tab title (RootView passes it into DashboardShell's subtitle).
         planned.append(PlannedWidget(type: .statusBoard, bind: "by-source", size: .medium, priority: next()))
         planned.append(PlannedWidget(type: .statusBoard, bind: "by-industry", size: .medium, priority: next()))
+        planned.append(PlannedWidget(type: .statusBoard, bind: "by-status", size: .medium, priority: next()))
         if !inputs.tierCounts.isEmpty {
             planned.append(PlannedWidget(type: .statusBoard, bind: "by-tier", size: .medium, priority: next()))
         }
@@ -45,33 +47,28 @@ enum DashboardBuilder {
     static func widgetData(_ inputs: DashboardInputs) -> [String: WidgetData] {
         let leads = inputs.leads
         // The leads breakdowns are computed over the fetched window; when that window is
-        // smaller than the true total, say so in the title (the KPI alone is exact).
+        // smaller than the true total, say so in the title (the toolbar subtitle total is exact).
         let windowed = inputs.totalCount > leads.count
         let scope = windowed ? " (latest \(leads.count) of \(inputs.totalCount))" : ""
         // The partial (degraded supplementary read) signal rides the chart title
         // now that the recent-leads table left the grid (P3).
         let partialNote = inputs.partial
             ? " (partial data — some breakdowns may be missing)" : ""
+        // by-status prefers the EXACT full-table counts (a recency window skews a pipeline-stage
+        // distribution toward "scraped"); when that supplementary read failed, fall back to the
+        // windowed rollup with the honest scope suffix — the board never vanishes.
+        let statusBoard = inputs.statusCounts.isEmpty
+            ? byStatusBoard(leads, titleSuffix: scope)
+            : board(title: "Leads by Status", titleSuffix: "",
+                    counts: Dictionary(uniqueKeysWithValues: inputs.statusCounts.map { (stageLabel($0.key), $0.value) }))
         return [
-            "total-leads": totalLeadsKPI(inputs.totalCount),
             "by-source": bySourceBoard(leads, titleSuffix: scope),
             "by-industry": byIndustryBoard(leads, titleSuffix: scope),
+            "by-status": statusBoard,
             "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
             "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope + partialNote),
         ]
-    }
-
-    private static func totalLeadsKPI(_ total: Int) -> WidgetData {
-        .kpi(KpiData(
-            title: "Total Leads",
-            value: Double(total),
-            format: .number,
-            previousValue: nil,
-            trend: nil,
-            trendLabel: nil,
-            sparkline: nil
-        ))
     }
 
     private static func bySourceBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
@@ -80,6 +77,19 @@ enum DashboardBuilder {
 
     private static func byIndustryBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
         categoricalBoard(leads, title: "Leads by Industry", titleSuffix: titleSuffix) { $0.industry }
+    }
+
+    /// Locale-stable display casing for a stage token ("scraped" → "Scraped") — POSIX-pinned,
+    /// matching this file's DateFormatter precedent, so a Turkish-locale run can't retitle a bucket.
+    private static func stageLabel(_ stage: String) -> String {
+        stage.capitalized(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// WINDOWED fallback for the status board (used only when the exact full-table counts are
+    /// unavailable): pipeline position (`enrichment_stage`) bucketed over the fetched window,
+    /// capitalized for display; rows without a stage fall to categoricalBoard's "Unknown".
+    private static func byStatusBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
+        categoricalBoard(leads, title: "Leads by Status", titleSuffix: titleSuffix) { $0.enrichmentStage.map(stageLabel) }
     }
 
     /// Counts grouped by a categorical lead field → a status board (via `board`).

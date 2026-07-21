@@ -99,7 +99,9 @@ struct RootView: View {
             PinnedStrip()
             VSplitView {
                 DashboardShell(
-                    dashboard: dashboard, title: "Leads", isRefreshing: model.isRefreshing,
+                    dashboard: dashboard, title: "Leads",
+                    subtitle: model.totalLeads > 0 ? "\(model.totalLeads.formatted()) total leads" : nil,
+                    isRefreshing: model.isRefreshing,
                     staleMessage: staleMessage,
                     onRefresh: { Task { await model.load() } }
                 )

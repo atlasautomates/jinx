@@ -9,25 +9,32 @@ struct LeadsRepository {
     /// throw and fail the load; supplementary tier/sentiment reads fail open and
     /// only mark the result `partial`.
     func fetch() async throws -> DashboardInputs {
-        async let total = totalCount()
         async let leads = recentLeads()
         async let tiers = tierCountsResult()
         async let sentiment = sentimentCountsResult()
+        let total = try await totalCount()   // statusCounts derives its residual from the exact total
+        async let status = statusCountsResult(totalCount: total)
         return try await Self.compose(
             leads: leads, totalCount: total,
-            tiers: await tiers, sentiment: await sentiment)
+            tiers: await tiers, sentiment: await sentiment,
+            status: await status)
     }
 
     /// Pure packaging seam (selftest target): supplementary results carry an `ok`
     /// flag so a FAILED read (partial) is distinguishable from an EMPTY table.
+    /// A failed STATUS read deliberately does NOT ride `partial`: the builder falls
+    /// back to the windowed rollup with its own honest "(latest N of M)" title, so
+    /// the board never vanishes and never silently lies.
     static func compose(
         leads: [LeadRow], totalCount: Int,
         tiers: (counts: [String: Int], ok: Bool),
-        sentiment: (counts: [String: Int], ok: Bool)
+        sentiment: (counts: [String: Int], ok: Bool),
+        status: (counts: [String: Int], ok: Bool) = ([:], ok: false)
     ) -> DashboardInputs {
         DashboardInputs(leads: leads, totalCount: totalCount,
                         tierCounts: tiers.counts,
                         sentimentCounts: sentiment.counts,
+                        statusCounts: status.ok ? status.counts : [:],
                         partial: !tiers.ok || !sentiment.ok)
     }
 
@@ -56,6 +63,41 @@ struct LeadsRepository {
     /// Counts of `replies.sentiment`. Fail-open.
     func sentimentCountsResult() async -> (counts: [String: Int], ok: Bool) {
         await columnCounts(table: "replies", column: "sentiment")
+    }
+
+    /// The four pipeline stages the enrichment layer writes (the DB's forward-only
+    /// trigger enforces the same set, in this order).
+    static let knownStages = ["scraped", "researched", "personalized", "campaigned"]
+
+    /// EXACT full-table counts per `enrichment_stage`, via one filtered `count=exact`
+    /// HEAD request per stage plus a NULL count — deliberately NOT `columnCounts`
+    /// paging: `leads` is the big table, and the 20k page cap would silently floor a
+    /// stage tally there. A recency-windowed stage distribution is systematically
+    /// skewed (new leads cluster at "scraped"), so exact counts are what make this
+    /// board a truthful funnel. Fail-open: on any error the builder falls back to
+    /// the windowed rollup. Any residual vs. the exact total (a value outside the
+    /// known set — shouldn't exist given the trigger) folds into the "unknown"
+    /// bucket rather than being invented as its own label.
+    func statusCountsResult(totalCount: Int) async -> (counts: [String: Int], ok: Bool) {
+        do {
+            var counts: [String: Int] = [:]
+            try await withThrowingTaskGroup(of: (String, Int).self) { group in
+                for stage in Self.knownStages {
+                    group.addTask {
+                        (stage, try await client.count("leads", [URLQueryItem(name: "enrichment_stage", value: "eq.\(stage)")]))
+                    }
+                }
+                group.addTask {
+                    ("unknown", try await client.count("leads", [URLQueryItem(name: "enrichment_stage", value: "is.null")]))
+                }
+                for try await (stage, n) in group where n > 0 { counts[stage] = n }
+            }
+            let residual = totalCount - counts.values.reduce(0, +)
+            if residual > 0 { counts["unknown", default: 0] += residual }
+            return (counts, true)
+        } catch {
+            return ([:], false)
+        }
     }
 
     /// Counts-only conveniences for the voice surfaces (`--query`, App Intents) and

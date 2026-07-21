@@ -13,6 +13,9 @@ final class DashboardViewModel {
     private(set) var recentLeads: [LeadRow] = []
     /// True while a `load()` is in flight — drives the Refresh button's disabled state.
     private(set) var isRefreshing = false
+    /// Exact table total from the last successful fetch — the Leads tab's title subtext
+    /// (the total-leads KPI left the grid in i-9f08). 0 until the first load lands.
+    private(set) var totalLeads = 0
 
     /// Fetch + rebuild. Keeps the last good value on screen during a refresh, and
     /// degrades to `.stale` (data + reason) rather than `.failed` if one was present.
@@ -33,6 +36,7 @@ final class DashboardViewModel {
             let repo = LeadsRepository(client: client)
             let inputs = try await repo.fetch()
             recentLeads = inputs.leads
+            totalLeads = inputs.totalCount
             state = .loaded(DashboardBuilder.build(inputs))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
