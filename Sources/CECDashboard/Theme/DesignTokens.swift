@@ -26,7 +26,7 @@ func rgba(_ r: Double, _ g: Double, _ b: Double, _ a: Double) -> Color {
     Color(.sRGB, red: r / 255, green: g / 255, blue: b / 255, opacity: a)
 }
 
-// MARK: - Palette (from kb/design-systems/atlasautomates, dark mode)
+// MARK: - Palette (from .claude/design/design-systems/atlasautomates, dark mode)
 
 enum Palette {
     static let bgRoot = Color(hex: "050508")

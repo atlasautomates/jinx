@@ -7,7 +7,7 @@ internal tool for the user, run locally.
 
 **Status:** planned. Next = v0 spike (M0).
 **Inference path (decided):** `claude -p` headless on the Max subscription.
-**Design:** adopts the house design system (`kb/design-systems/atlasautomates`),
+**Design:** adopts the house design system (`.claude/design/design-systems/atlasautomates`),
 dark mode, pink accent.
 
 ---
@@ -116,7 +116,7 @@ Verbatim shape from the template, lead-adapted — what `WidgetGrid` renders.
 
 ## 4. Design system adoption
 
-Translate `kb/design-systems/atlasautomates/tokens.css` → `DesignTokens.swift`.
+Translate `.claude/design/design-systems/atlasautomates/tokens.css` → `DesignTokens.swift`.
 **Dark mode default, accent pink `#dd7bbb`** (matches the template's `dashboard.json`).
 
 | Token group | Source vars | Swift |
