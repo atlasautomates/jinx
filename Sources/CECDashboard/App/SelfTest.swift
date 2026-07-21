@@ -221,6 +221,36 @@ enum SelfTest {
         if clean.sentimentCounts["positive"] != 2 || !clean.tierCounts.isEmpty {
             problems.append("leads-compose: counts not packaged through")
         }
+
+        // Exact status counts: packaged through when ok, dropped (→ windowed fallback)
+        // when the read failed — and a failed status read must NOT mark partial
+        // (the fallback board carries its own honest scope suffix instead).
+        let withStatus = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: 720,
+            tiers: ([:], ok: true), sentiment: ([:], ok: true),
+            status: (["scraped": 400, "personalized": 300, "unknown": 20], ok: true))
+        if withStatus.statusCounts.isEmpty { problems.append("leads-compose: ok status counts must package through") }
+        if case .statusBoard(let board)? = DashboardBuilder.widgetData(withStatus)["by-status"] {
+            if board.title != "Leads by Status" {
+                problems.append("leads-compose: exact status board must not carry a window suffix (got '\(board.title)')")
+            }
+            if board.groups.reduce(0, { $0 + $1.count }) != 720 {
+                problems.append("leads-compose: exact status counts must sum to the table total")
+            }
+            if Set(board.groups.map { $0.label }) != ["Scraped", "Personalized", "Unknown"] {
+                problems.append("leads-compose: exact status labels unexpected")
+            }
+        } else { problems.append("leads-compose: exact by-status is not a status board") }
+        let statusFailed = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: 720,
+            tiers: ([:], ok: true), sentiment: ([:], ok: true),
+            status: (["scraped": 1], ok: false))
+        if !statusFailed.statusCounts.isEmpty { problems.append("leads-compose: failed status read must drop counts") }
+        if statusFailed.partial { problems.append("leads-compose: failed status read must not mark partial") }
+        if case .statusBoard(let board)? = DashboardBuilder.widgetData(statusFailed)["by-status"],
+           !board.title.contains("(latest") {
+            problems.append("leads-compose: fallback status board must carry the window suffix")
+        }
         if case .chart(let c)? = DashboardBuilder.build(clean).widgets["added-weekly"],
            c.title.contains("partial") {
             problems.append("leads-compose: clean load must not title the chart partial")

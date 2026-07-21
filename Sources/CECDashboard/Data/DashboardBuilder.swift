@@ -54,10 +54,17 @@ enum DashboardBuilder {
         // now that the recent-leads table left the grid (P3).
         let partialNote = inputs.partial
             ? " (partial data — some breakdowns may be missing)" : ""
+        // by-status prefers the EXACT full-table counts (a recency window skews a pipeline-stage
+        // distribution toward "scraped"); when that supplementary read failed, fall back to the
+        // windowed rollup with the honest scope suffix — the board never vanishes.
+        let statusBoard = inputs.statusCounts.isEmpty
+            ? byStatusBoard(leads, titleSuffix: scope)
+            : board(title: "Leads by Status", titleSuffix: "",
+                    counts: Dictionary(uniqueKeysWithValues: inputs.statusCounts.map { (stageLabel($0.key), $0.value) }))
         return [
             "by-source": bySourceBoard(leads, titleSuffix: scope),
             "by-industry": byIndustryBoard(leads, titleSuffix: scope),
-            "by-status": byStatusBoard(leads, titleSuffix: scope),
+            "by-status": statusBoard,
             "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
             "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope + partialNote),
@@ -72,11 +79,17 @@ enum DashboardBuilder {
         categoricalBoard(leads, title: "Leads by Industry", titleSuffix: titleSuffix) { $0.industry }
     }
 
-    /// Pipeline position (`enrichment_stage`: scraped/researched/personalized/campaigned — free
-    /// strings written by the enrichment layer). Capitalized for display; rows without a stage
-    /// fall to categoricalBoard's "Unknown", same as the peer boards.
+    /// Locale-stable display casing for a stage token ("scraped" → "Scraped") — POSIX-pinned,
+    /// matching this file's DateFormatter precedent, so a Turkish-locale run can't retitle a bucket.
+    private static func stageLabel(_ stage: String) -> String {
+        stage.capitalized(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// WINDOWED fallback for the status board (used only when the exact full-table counts are
+    /// unavailable): pipeline position (`enrichment_stage`) bucketed over the fetched window,
+    /// capitalized for display; rows without a stage fall to categoricalBoard's "Unknown".
     private static func byStatusBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
-        categoricalBoard(leads, title: "Leads by Status", titleSuffix: titleSuffix) { $0.enrichmentStage?.capitalized }
+        categoricalBoard(leads, title: "Leads by Status", titleSuffix: titleSuffix) { $0.enrichmentStage.map(stageLabel) }
     }
 
     /// Counts grouped by a categorical lead field → a status board (via `board`).
