@@ -48,23 +48,35 @@ enum SelfTest {
         // Binding: DashboardBuilder turns lead rows into the widget contract.
         let sampleLeads: [LeadRow] = [
             LeadRow(id: "1", companyName: "Acme", firstName: "A", industry: "Auto",
-                    leadSource: "gmaps-leads", city: "Tampa", state: "FL", createdAt: "2026-06-10T12:00:00+00:00"),
+                    leadSource: "gmaps-leads", city: "Tampa", state: "FL", createdAt: "2026-06-10T12:00:00+00:00",
+                    enrichmentStage: "personalized"),
             LeadRow(id: "2", companyName: "Globex", firstName: "B", industry: "Biotech",
-                    leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T12:00:00.500+00:00"),
+                    leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T12:00:00.500+00:00",
+                    enrichmentStage: "scraped"),
             LeadRow(id: "3", companyName: "Initech", firstName: "C", industry: "Tech",
                     leadSource: "gmaps-leads", city: nil, state: nil, createdAt: nil),
         ]
         let built = DashboardBuilder.build(DashboardInputs(leads: sampleLeads, totalCount: 720))
         // Deterministic plan: tier/sentiment boards are skipped when their
         // supplementary counts are empty (empty board = noise); recent-leads is
-        // the native list below the grid now (P3), not a widget.
+        // the native list below the grid now (P3), not a widget; total-leads is
+        // the toolbar subtitle now (i-9f08), not a KPI widget.
         if Set(built.layout.widgets.map { $0.id })
-            != ["total-leads", "by-source", "by-industry", "added-weekly"] {
+            != ["by-source", "by-industry", "by-status", "added-weekly"] {
             problems.append("builder: unexpected widget ids (\(built.layout.widgets.map { $0.id }.sorted()))")
         }
         problems.append(contentsOf: validateGrid(built.layout, label: "leads-build"))
-        if case .kpi(let kpi)? = built.widgets["total-leads"], kpi.value != 720 {
-            problems.append("builder: total-leads KPI should reflect totalCount (got \(kpi.value))")
+        // by-status buckets enrichment_stage capitalized, nil → "Unknown", counts sum to the window.
+        if case .statusBoard(let board)? = built.widgets["by-status"] {
+            let labels = Set(board.groups.map { $0.label })
+            if labels != ["Personalized", "Scraped", "Unknown"] {
+                problems.append("builder: by-status labels unexpected (\(labels.sorted()))")
+            }
+            if board.groups.reduce(0, { $0 + $1.count }) != sampleLeads.count {
+                problems.append("builder: by-status counts != lead count")
+            }
+        } else {
+            problems.append("builder: by-status is not a status board")
         }
         if case .statusBoard(let board)? = built.widgets["by-source"] {
             let summed = board.groups.reduce(0) { $0 + $1.count }

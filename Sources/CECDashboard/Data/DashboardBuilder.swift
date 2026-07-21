@@ -9,7 +9,7 @@ enum DashboardBuilder {
     /// The data series `widgetData` produces. Kept as a drift guard: the selftest
     /// asserts these match `widgetData(_:)`'s keys exactly.
     static let availableBinds: Set<String> = [
-        "total-leads", "by-source", "by-industry", "by-tier", "sentiment-mix",
+        "by-source", "by-industry", "by-status", "by-tier", "sentiment-mix",
         "added-weekly",
     ]
 
@@ -22,9 +22,11 @@ enum DashboardBuilder {
         var priority = 0
         func next() -> Int { priority += 1; return priority }
 
-        planned.append(PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: next()))
+        // The total-leads KPI left the grid (i-9f08): the exact total now renders as subtext
+        // under the tab title (RootView passes it into DashboardShell's subtitle).
         planned.append(PlannedWidget(type: .statusBoard, bind: "by-source", size: .medium, priority: next()))
         planned.append(PlannedWidget(type: .statusBoard, bind: "by-industry", size: .medium, priority: next()))
+        planned.append(PlannedWidget(type: .statusBoard, bind: "by-status", size: .medium, priority: next()))
         if !inputs.tierCounts.isEmpty {
             planned.append(PlannedWidget(type: .statusBoard, bind: "by-tier", size: .medium, priority: next()))
         }
@@ -45,7 +47,7 @@ enum DashboardBuilder {
     static func widgetData(_ inputs: DashboardInputs) -> [String: WidgetData] {
         let leads = inputs.leads
         // The leads breakdowns are computed over the fetched window; when that window is
-        // smaller than the true total, say so in the title (the KPI alone is exact).
+        // smaller than the true total, say so in the title (the toolbar subtitle total is exact).
         let windowed = inputs.totalCount > leads.count
         let scope = windowed ? " (latest \(leads.count) of \(inputs.totalCount))" : ""
         // The partial (degraded supplementary read) signal rides the chart title
@@ -53,25 +55,13 @@ enum DashboardBuilder {
         let partialNote = inputs.partial
             ? " (partial data — some breakdowns may be missing)" : ""
         return [
-            "total-leads": totalLeadsKPI(inputs.totalCount),
             "by-source": bySourceBoard(leads, titleSuffix: scope),
             "by-industry": byIndustryBoard(leads, titleSuffix: scope),
+            "by-status": byStatusBoard(leads, titleSuffix: scope),
             "by-tier": board(title: "Leads by Tier", titleSuffix: "", counts: inputs.tierCounts),
             "sentiment-mix": board(title: "Reply Sentiment", titleSuffix: "", counts: inputs.sentimentCounts),
             "added-weekly": addedWeeklyChart(leads, titleSuffix: scope + partialNote),
         ]
-    }
-
-    private static func totalLeadsKPI(_ total: Int) -> WidgetData {
-        .kpi(KpiData(
-            title: "Total Leads",
-            value: Double(total),
-            format: .number,
-            previousValue: nil,
-            trend: nil,
-            trendLabel: nil,
-            sparkline: nil
-        ))
     }
 
     private static func bySourceBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
@@ -80,6 +70,13 @@ enum DashboardBuilder {
 
     private static func byIndustryBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
         categoricalBoard(leads, title: "Leads by Industry", titleSuffix: titleSuffix) { $0.industry }
+    }
+
+    /// Pipeline position (`enrichment_stage`: scraped/researched/personalized/campaigned — free
+    /// strings written by the enrichment layer). Capitalized for display; rows without a stage
+    /// fall to categoricalBoard's "Unknown", same as the peer boards.
+    private static func byStatusBoard(_ leads: [LeadRow], titleSuffix: String = "") -> WidgetData {
+        categoricalBoard(leads, title: "Leads by Status", titleSuffix: titleSuffix) { $0.enrichmentStage?.capitalized }
     }
 
     /// Counts grouped by a categorical lead field → a status board (via `board`).

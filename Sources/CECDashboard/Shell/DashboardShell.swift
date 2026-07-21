@@ -3,6 +3,8 @@ import SwiftUI
 struct DashboardShell: View {
     let dashboard: Dashboard
     var title: String = "CEC Dashboard"
+    /// Small secondary line under the title (e.g. the Leads tab's exact total). Nil = title only.
+    var subtitle: String? = nil
     var isRefreshing: Bool = false
     /// Non-nil when the displayed data is stale (last refresh failed); carries the reason.
     var staleMessage: String? = nil
@@ -15,7 +17,7 @@ struct DashboardShell: View {
             let bp = dashboard.layout.breakpointName(forWidth: Double(gridWidth))
 
             VStack(spacing: 0) {
-                Toolbar(title: title, breakpoint: bp, isRefreshing: isRefreshing,
+                Toolbar(title: title, subtitle: subtitle, breakpoint: bp, isRefreshing: isRefreshing,
                         onRefresh: onRefresh)
                     .padding(.horizontal, pad)
                     .padding(.vertical, Space.s4)
@@ -63,15 +65,23 @@ private struct StaleBanner: View {
 
 private struct Toolbar: View {
     let title: String
+    var subtitle: String? = nil
     let breakpoint: String
     let isRefreshing: Bool
     let onRefresh: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(title)
-                .font(.display(22, weight: .semibold))
-                .foregroundStyle(Palette.textPrimary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.display(22, weight: .semibold))
+                    .foregroundStyle(Palette.textPrimary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.dataMono(11, weight: .medium))
+                        .foregroundStyle(Palette.textSecondary)
+                }
+            }
 
             Spacer()
 
