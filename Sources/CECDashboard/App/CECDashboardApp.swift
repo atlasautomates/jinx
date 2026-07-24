@@ -4,6 +4,9 @@ import AppKit
 @main
 struct CECDashboardApp: App {
     init() {
+        // Pre-boot intercept (bible §9): render a preview PNG and exit BEFORE any
+        // store/network/Supabase subsystem constructs. Must come first.
+        PreviewHarness.runIfRequested()
         if CommandLine.arguments.contains("--selftest") {
             SelfTest.run()
         }

@@ -78,18 +78,13 @@ struct RootView: View {
 
     // MARK: - Leads tab (fixed deterministic layout, like Campaigns/Pipeline)
 
+    // ARM-B re-skin: the Leads tab renders the frozen A/B fixture directly (no
+    // DashboardViewModel / Supabase) — deterministic, no PII, no network. The
+    // legacy store path (`model`, `leadsSplit`) is retained but unused here so
+    // Campaigns/Pipeline stay untouched. (decision-log #16)
     @ViewBuilder
     private var leadsTab: some View {
-        switch model.state {
-        case .idle, .loading:
-            LoadingView()
-        case .loaded(let dashboard):
-            leadsSplit(dashboard: dashboard, staleMessage: nil)
-        case .stale(let dashboard, _, let message):
-            leadsSplit(dashboard: dashboard, staleMessage: message)
-        case .failed(let message):
-            ErrorView(message: message, onRetry: { Task { await model.load() } })
-        }
+        ABLeadsView(data: .ab)
     }
 
     /// Widget grid on top, native clickable recent-leads list below (P3) —
