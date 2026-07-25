@@ -11,13 +11,13 @@ enum Loadable<T> {
     case stale(T, since: Date, message: String)
     case failed(message: String)
 
-    /// The last successfully-loaded value, if any (loaded or stale).
     /// The stale banner text — non-nil only in `.stale`.
     var staleMessage: String? {
         if case .stale(_, _, let message) = self { return message }
         return nil
     }
 
+    /// The last successfully-loaded value, if any (loaded or stale).
     var value: T? {
         switch self {
         case .loaded(let v), .stale(let v, _, _): return v
