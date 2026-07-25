@@ -36,17 +36,24 @@ struct ABLeadsView: View {
 
     @ViewBuilder
     private var stack: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.space5) {
+        VStack(alignment: .leading, spacing: DesignTokens.space4) {
             header
             ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)      // level 1
             ABTrendRow(data: data)                                            // level 2
-            ABBreakdownRowGroup(data: data,
-                forcedHoverStatusLabel: interactionDemo ? "Replied" : nil)    // level 3
-            ABRecentLeadsTable(leads: data.recentLeads,
-                forcedHoverIndex: interactionDemo ? 1 : nil,
-                staticRender: staticRender)                                   // level 4
-                .frame(maxHeight: staticRender ? 320 : .infinity, alignment: .top)
-                .clipped()
+
+            // VARIANT C: levels 3 + 4 share one band (Arm A layout). The recent
+            // list flexes wide on the LEFT so it clears the fold; the three
+            // breakdowns stack COMPACTLY in a narrow right column.
+            HStack(alignment: .top, spacing: DesignTokens.space5) {
+                ABRecentLeadsTable(leads: data.recentLeads,
+                    forcedHoverIndex: interactionDemo ? 1 : nil,
+                    staticRender: staticRender)                               // level 4
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                ABBreakdownRowGroup(data: data,
+                    forcedHoverStatusLabel: interactionDemo ? "Replied" : nil) // level 3
+                    .frame(width: 384)
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 
@@ -66,8 +73,7 @@ struct ABLeadsView: View {
                     .font(.adventor(DesignTokens.textXl, bold: true))
                     .foregroundStyle(DesignTokens.textPrimary)
                 Rectangle().fill(DesignTokens.accent)
-                    .frame(width: 34, height: 2)
-                    .shadow(color: DesignTokens.accent.opacity(0.7), radius: 4)
+                    .frame(width: 34, height: 2)   // flat teal rule (glow reserved for hero)
             }
             Spacer()
             HStack(spacing: DesignTokens.space4) {

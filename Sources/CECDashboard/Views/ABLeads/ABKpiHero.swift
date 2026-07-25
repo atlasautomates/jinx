@@ -23,11 +23,18 @@ struct ABKpiCard: View {
     private var accentStrong: Color { role == .hero ? DesignTokens.accentStrong : DesignTokens.accentPinkStrong }
     private var accentBorder: Color { role == .hero ? DesignTokens.accentBorder : DesignTokens.accentPinkBorder }
     private var pressed: Bool { forcedPressed }
+    /// VARIANT C: glow/bloom is confined to the single hero numeral (the one
+    /// special moment). The reward KPI keeps its pink hue but stays FLAT — on
+    /// true black, flat neon still pops.
+    private var isHero: Bool { role == .hero }
 
     private var heroNumberSize: CGFloat { role == .hero ? DesignTokens.text4xl : DesignTokens.text3xl }
+    /// VARIANT C demotion: hero sits at the highest elevation (closest = top
+    /// priority, bible §5); the reward companion drops one surface step back.
+    private var surfaceLevel: ABSurface.Level { role == .hero ? .elevated : .surface }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.space4) {
+        VStack(alignment: .leading, spacing: DesignTokens.space3) {
             HStack(spacing: DesignTokens.space2) {
                 Circle().fill(accent).frame(width: 7, height: 7)
                 ABSectionLabel(caption)
@@ -38,8 +45,10 @@ struct ABKpiCard: View {
                 Text(percent, format: .number.precision(.fractionLength(1)))
                     .font(.adventor(heroNumberSize, bold: true))
                     .foregroundStyle(accent)
-                    .shadow(color: accent.opacity(hovering ? 0.55 : 0.35),
-                            radius: hovering ? 16 : 10)   // neon glow, accent-tinted (token color)
+                    // The ONLY glow in the view — the hero numeral blooms; it
+                    // intensifies on hover. The reward numeral stays flat.
+                    .shadow(color: isHero ? accent.opacity(hovering ? 0.60 : 0.40) : .clear,
+                            radius: isHero ? (hovering ? 18 : 11) : 0)
                 Text("%")
                     .font(.adventor(role == .hero ? DesignTokens.text2xl : DesignTokens.textXl, bold: true))
                     .foregroundStyle(accentStrong)
@@ -62,9 +71,9 @@ struct ABKpiCard: View {
                 Text(denominatorLabel).font(.adventor(DesignTokens.textSm)).foregroundStyle(DesignTokens.textMuted)
             }
         }
-        .padding(DesignTokens.space5)
+        .padding(DesignTokens.space4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .abSurface(.elevated, radius: DesignTokens.radiusXl,
+        .abSurface(surfaceLevel, radius: DesignTokens.radiusXl,
                    lifted: hovering && !pressed, accentBorder: accentBorder)
         .scaleEffect(pressed ? 0.985 : (hovering ? 1.006 : 1.0))
         .brightness(pressed ? -0.02 : 0)
@@ -81,7 +90,7 @@ struct ABKpiCard: View {
                     .fill(LinearGradient(colors: [accent, accentStrong],
                                          startPoint: .leading, endPoint: .trailing))
                     .frame(width: max(6, geo.size.width * CGFloat(percent / 100.0)))
-                    .shadow(color: accent.opacity(0.5), radius: 6)
+                    // VARIANT C: flat neon fill — no bloom (glow is hero-numeral only).
             }
         }
         .frame(height: 8)

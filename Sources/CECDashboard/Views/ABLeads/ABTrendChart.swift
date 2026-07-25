@@ -38,7 +38,7 @@ struct ABTrendChart: View {
 
             plot
                 .frame(maxWidth: .infinity)
-                .frame(height: 118)
+                .frame(height: 78)   // VARIANT C: trimmed to give the bottom band room
 
             HStack {
                 Text(weeks.first ?? "").font(.abMono(DesignTokens.textXs)).foregroundStyle(DesignTokens.textGhost)
@@ -53,7 +53,7 @@ struct ABTrendChart: View {
                 Text(weeks.last ?? "").font(.abMono(DesignTokens.textXs)).foregroundStyle(DesignTokens.textGhost)
             }
         }
-        .padding(DesignTokens.space4)
+        .padding(DesignTokens.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .abSurface(.surface, radius: DesignTokens.radiusLg,
                    lifted: hovering, accentBorder: hovering ? accentBorder : nil)
@@ -105,13 +105,12 @@ struct ABTrendChart: View {
                 }
                 .stroke(LinearGradient(colors: [accent, accentStrong], startPoint: .leading, endPoint: .trailing),
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                .shadow(color: accent.opacity(0.45), radius: 5)
+                // VARIANT C: flat neon stroke — no bloom (glow is hero-numeral only).
 
                 // end marker
                 if let last = pts.last {
                     Circle().fill(accentStrong)
                         .frame(width: 8, height: 8)
-                        .shadow(color: accent.opacity(0.7), radius: 5)
                         .position(last)
                     Circle().strokeBorder(DesignTokens.bgSurface, lineWidth: 2)
                         .frame(width: 8, height: 8)

@@ -60,8 +60,7 @@ private struct ABLeadRow: View {
             // left-edge marker slides in on hover
             RoundedRectangle(cornerRadius: 2)
                 .fill(marker)
-                .frame(width: 3, height: active ? 26 : 0)
-                .shadow(color: marker.opacity(0.7), radius: active ? 5 : 0)
+                .frame(width: 3, height: active ? 26 : 0)   // flat marker slides in (no bloom)
 
             Text(lead.company)
                 .font(.adventor(DesignTokens.textBase, bold: active))

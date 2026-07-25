@@ -1,8 +1,10 @@
 import SwiftUI
 
-// LEVEL 3: three breakdowns — by source, industry, status. Horizontal bars,
-// width proportional to the panel max. Source/industry use teal; status colors
-// each bar by its role (teal/pink/neutral/warn — decision-log #5).
+// LEVEL 3 (VARIANT C): three breakdowns — by source, industry, status — stacked
+// COMPACTLY in a narrow side column (Arm A's density) so the same data reads
+// concisely and leaves the recent-leads list room above the fold. Horizontal
+// bars, width proportional to the panel max. Source/industry use teal; status
+// colors each bar by its role (teal/pink/neutral/warn — decision-log #5).
 
 struct ABBreakdownPanel: View {
     let title: String
@@ -15,9 +17,9 @@ struct ABBreakdownPanel: View {
     private var maxCount: Int { items.map(\.count).max() ?? 1 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.space3) {
+        VStack(alignment: .leading, spacing: DesignTokens.space2) {
             ABSectionLabel(title)
-            VStack(spacing: DesignTokens.space2) {
+            VStack(spacing: DesignTokens.space1) {
                 ForEach(items) { item in
                     ABBreakdownRow(label: item.label, count: item.count,
                                    fraction: CGFloat(item.count) / CGFloat(maxCount),
@@ -26,7 +28,7 @@ struct ABBreakdownPanel: View {
                 }
             }
         }
-        .padding(DesignTokens.space4)
+        .padding(DesignTokens.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .abSurface(.surface, radius: DesignTokens.radiusLg)
     }
@@ -43,31 +45,32 @@ private struct ABBreakdownRow: View {
     private var active: Bool { hovering || forcedHover }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DesignTokens.space1) {
+        VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(label)
-                    .font(.adventor(DesignTokens.textSm, bold: active))
+                    .font(.adventor(DesignTokens.textXs, bold: active))
                     .foregroundStyle(active ? DesignTokens.textPrimary : DesignTokens.textSecondary)
                     .lineLimit(1)
                 Spacer()
                 Text(count, format: .number)
-                    .font(.abMono(DesignTokens.textSm, weight: .semibold))
+                    .font(.abMono(DesignTokens.textXs, weight: .semibold))
                     .foregroundStyle(active ? color : DesignTokens.textSecondary)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(DesignTokens.bgRoot)
                     Capsule()
+                        // VARIANT C: flat neon bar — no bloom (glow is hero-numeral only);
+                        // hover just brightens the fill to full strength.
                         .fill(LinearGradient(
                             colors: active ? [color, color] : [color.opacity(0.85), color.opacity(0.55)],
                             startPoint: .leading, endPoint: .trailing))
                         .frame(width: max(4, geo.size.width * fraction))
-                        .shadow(color: active ? color.opacity(0.5) : .clear, radius: 5)
                 }
             }
-            .frame(height: 6)
+            .frame(height: 5)
         }
-        .padding(.vertical, DesignTokens.space1)
+        .padding(.vertical, 1)
         .padding(.horizontal, DesignTokens.space2)
         .background(
             RoundedRectangle(cornerRadius: DesignTokens.radiusSm, style: .continuous)
@@ -92,14 +95,12 @@ struct ABBreakdownRowGroup: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: DesignTokens.space5) {
+        // VARIANT C: stacked vertically in the narrow side column (Arm A layout).
+        VStack(alignment: .leading, spacing: DesignTokens.space2) {
             ABBreakdownPanel(title: "By source", items: data.bySource)
-                .frame(maxWidth: .infinity)
             ABBreakdownPanel(title: "By industry", items: data.byIndustry)
-                .frame(maxWidth: .infinity)
             ABBreakdownPanel(title: "By status", items: data.byStatus,
                              colorFor: statusColor, forcedHoverLabel: forcedHoverStatusLabel)
-                .frame(maxWidth: .infinity)
         }
     }
 }
