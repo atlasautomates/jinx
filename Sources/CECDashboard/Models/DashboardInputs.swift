@@ -3,7 +3,7 @@ import Foundation
 /// Everything fetched for one dashboard render. `leads`/`totalCount` are essential
 /// (a fetch failure fails the load); `tierCounts`/`sentimentCounts` are supplementary
 /// (read from separate tables, fail-open to empty → their widgets simply don't appear).
-struct DashboardInputs {
+struct DashboardInputs: Sendable {
     let leads: [LeadRow]
     let totalCount: Int
     var tierCounts: [String: Int] = [:]        // lead_enrichment.lead_tier → count
@@ -27,5 +27,5 @@ struct DashboardInputs {
     var messagedSends: [SentEvent] = []
 
     /// One sent email: the lead it went to + when it was sent. Value type, Sendable.
-    struct SentEvent { let leadID: String; let sentAt: String }
+    struct SentEvent: Sendable { let leadID: String; let sentAt: String }
 }

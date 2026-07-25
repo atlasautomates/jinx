@@ -2,7 +2,7 @@ import Foundation
 
 /// A row from the `leads` table — the subset the dashboard reads.
 /// Column names match `.claude/shared/supabase_client.py` (the schema contract).
-struct LeadRow: Codable, Identifiable {
+struct LeadRow: Codable, Identifiable, Sendable {
     let id: String
     let companyName: String?
     let firstName: String?

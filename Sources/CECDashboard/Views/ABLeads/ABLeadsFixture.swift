@@ -4,7 +4,7 @@ import Foundation
 // PII, no network, no Supabase. Both arms render this identical data. Embedded
 // as an in-memory Swift value so the Leads tab renders deterministically.
 
-struct ABLeadsData {
+struct ABLeadsData: Sendable {
     struct Totals { let scraped: Int; let emailed: Int; let replies: Int }
     struct Series { let weeks: [String]; let values: [Int] }
     struct Breakdown: Identifiable { let label: String; let count: Int; var id: String { label } }

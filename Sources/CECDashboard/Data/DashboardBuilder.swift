@@ -15,8 +15,8 @@ enum DashboardBuilder {
 
     /// Hand-designed fixed layout. Supplementary boards (tier/sentiment) appear
     /// only when their table returned data — an empty board is noise, not signal.
-    /// (The recent-leads table left the grid in P3: it's now the native
-    /// clickable `RecentLeadsList` below the grid.)
+    /// (The recent-leads table left the grid in P3 and now lives in the
+    /// ABLeads surface; this builder currently serves selftest/packer only.)
     static func build(_ inputs: DashboardInputs) -> Dashboard {
         var planned: [PlannedWidget] = []
         var priority = 0

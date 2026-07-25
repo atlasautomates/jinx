@@ -96,15 +96,15 @@ struct RootView: View {
 
     @ViewBuilder
     private var leadsContent: some View {
-        switch model.state {
-        case .idle, .loading:
-            ABLoadingView()
-        case .loaded(let data):
-            liveLeads(data, staleMessage: nil)
-        case .stale(let data, _, let message):
-            liveLeads(data, staleMessage: message)
-        case .failed(let message):
+        // loaded and stale share ONE structural arm so SwiftUI keeps the
+        // ABLeads subtree's identity across stale⇄loaded flips — a transient
+        // refresh failure must not reset scroll/hover state (S05 review fix).
+        if let data = model.state.value {
+            liveLeads(data, staleMessage: model.state.staleMessage)
+        } else if case .failed(let message) = model.state {
             ABErrorView(message: message, onRetry: { Task { await model.load() } })
+        } else {
+            ABLoadingView()
         }
     }
 
