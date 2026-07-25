@@ -1,25 +1,21 @@
 import Foundation
 import Observation
 
-/// Owns the dashboard's async state. Fetches leads, builds the dashboard, and
-/// exposes a `Loadable` so the view renders loading / loaded / stale / failed
-/// distinctly (never a silent blank).
+/// Owns the Leads tab's async state. Fetches the live lead pipeline, maps it into
+/// the re-skinned `ABLeadsData` shape, and exposes a `Loadable` so the view renders
+/// loading / loaded / stale / failed distinctly (never a silent blank).
 @MainActor
 @Observable
 final class DashboardViewModel {
-    private(set) var state: Loadable<Dashboard> = .idle
-    /// The fetched lead rows behind the dashboard — feeds the native clickable
-    /// RecentLeadsList (P3), which replaced the recent-leads table widget.
-    private(set) var recentLeads: [LeadRow] = []
-    /// True while a `load()` is in flight — drives the Refresh button's disabled state.
+    private(set) var state: Loadable<ABLeadsData> = .idle
+    /// True while a `load()` is in flight — drives the Refresh affordance's spinner
+    /// and disabled state.
     private(set) var isRefreshing = false
-    /// Exact table total from the last successful fetch — the Leads tab's title subtext
-    /// (the total-leads KPI left the grid in i-9f08). 0 until the first load lands.
-    private(set) var totalLeads = 0
 
-    /// Fetch + rebuild. Keeps the last good value on screen during a refresh, and
+    /// Fetch + map. Keeps the last good value on screen during a refresh, and
     /// degrades to `.stale` (data + reason) rather than `.failed` if one was present.
-    /// Layout is fully deterministic (same shape as the Campaigns/Pipeline tabs).
+    /// The layout is fully deterministic (same shape as the Campaigns/Pipeline tabs);
+    /// only the data changes on refresh.
     func load() async {
         // In-flight guard: overlapping loads (double-click, retry during a slow fetch)
         // would race on `state` and could clobber fresh data with an older response.
@@ -35,9 +31,7 @@ final class DashboardViewModel {
             let client = try SupabaseClient.make()
             let repo = LeadsRepository(client: client)
             let inputs = try await repo.fetch()
-            recentLeads = inputs.leads
-            totalLeads = inputs.totalCount
-            state = .loaded(DashboardBuilder.build(inputs))
+            state = .loaded(ABLeadsData(inputs: inputs))
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if let previous {

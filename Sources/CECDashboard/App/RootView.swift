@@ -45,10 +45,11 @@ struct RootView: View {
         .task { await periodicRefresh() }       // re-fetch Leads+Campaigns+backlog every 10 min
     }
 
-    /// Re-fetch Leads + Campaigns every 10 minutes while the app is open (both use
-    /// fixed deterministic layouts, so this is a pure data refresh). Manual Refresh
+    /// Re-fetch Leads + Campaigns + backlog every 10 minutes while the app is open.
+    /// Each tab's layout is deterministic, so only the data changes — the live Leads
+    /// tab re-maps `model`'s fetch into `ABLeadsData` on each pass. Manual Refresh
     /// stays per-tab. (Pipeline is deliberately NOT in this fan-out —
-    /// `pipelinePolling` owns its cadence.)
+    /// `pipelinePolling` owns its faster cadence.)
     private func periodicRefresh() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
@@ -76,35 +77,50 @@ struct RootView: View {
         }
     }
 
-    // MARK: - Leads tab (fixed deterministic layout, like Campaigns/Pipeline)
+    // MARK: - Leads tab (re-skinned ABLeads, live data)
 
-    // ARM-B re-skin: the Leads tab renders the frozen A/B fixture directly (no
-    // DashboardViewModel / Supabase) — deterministic, no PII, no network. The
-    // legacy store path (`model`, `leadsSplit`) is retained but unused here so
-    // Campaigns/Pipeline stay untouched. (decision-log #16)
+    // The Leads tab renders `ABLeadsView` from the LIVE pipeline: DashboardViewModel
+    // fetches Supabase (LeadsRepository → DashboardInputs) and maps it into
+    // `ABLeadsData`. The pinned strip rides on top; rows/pins open the shared lead
+    // profile. Loadable states render distinctly (loading / error / stale) — never a
+    // blank black screen. The `--screenshot` harness renders the FROZEN fixture
+    // through this same view code (no network). (decision-log #16)
     @ViewBuilder
     private var leadsTab: some View {
-        ABLeadsView(data: .ab)
-    }
-
-    /// Widget grid on top, native clickable recent-leads list below (P3) —
-    /// same VSplitView shape as the Pipeline tab's dashboard/inspector split.
-    private func leadsSplit(dashboard: Dashboard, staleMessage: String?) -> some View {
         VStack(spacing: 0) {
             PinnedStrip()
-            VSplitView {
-                DashboardShell(
-                    dashboard: dashboard, title: "Leads",
-                    subtitle: model.totalLeads > 0 ? "\(model.totalLeads.formatted()) total leads" : nil,
-                    isRefreshing: model.isRefreshing,
-                    staleMessage: staleMessage,
-                    onRefresh: { Task { await model.load() } }
-                )
-                .frame(minHeight: 260)
-                RecentLeadsList(leads: model.recentLeads)
-                    .frame(minHeight: 160, idealHeight: 240)
-            }
+            leadsContent
         }
+        .background(DesignTokens.bgRoot)
+    }
+
+    @ViewBuilder
+    private var leadsContent: some View {
+        switch model.state {
+        case .idle, .loading:
+            ABLoadingView()
+        case .loaded(let data):
+            liveLeads(data, staleMessage: nil)
+        case .stale(let data, _, let message):
+            liveLeads(data, staleMessage: message)
+        case .failed(let message):
+            ABErrorView(message: message, onRetry: { Task { await model.load() } })
+        }
+    }
+
+    /// The live ABLeads surface: row tap → shared profile sheet, header refresh →
+    /// live re-fetch, stale banner when a refresh degraded.
+    private func liveLeads(_ data: ABLeadsData, staleMessage: String?) -> some View {
+        ABLeadsView(
+            data: data,
+            onSelectLead: { lead in
+                guard let id = lead.leadID else { return }
+                profilePresenter.active = LeadRef(id: id, companyName: lead.company, email: nil)
+            },
+            onRefresh: { Task { await model.load() } },
+            isRefreshing: model.isRefreshing,
+            staleMessage: staleMessage
+        )
     }
 
     // MARK: - Campaigns tab (fixed deterministic layout; no Re-layout button)

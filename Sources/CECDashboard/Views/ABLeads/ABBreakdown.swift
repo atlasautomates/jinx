@@ -13,12 +13,25 @@ struct ABBreakdownPanel: View {
     var colorFor: ((String) -> Color)? = nil
     /// Force one row's hover state for the interaction-demo preview.
     var forcedHoverLabel: String? = nil
+    /// Honesty note when this breakdown is a windowed slice of a larger total
+    /// (e.g. "1000 of 1413") — a faint caption beside the title. nil = exact/
+    /// complete (no caption), so the fixture render is unaffected.
+    var scopeNote: String? = nil
 
-    private var maxCount: Int { items.map(\.count).max() ?? 1 }
+    // max(1, …) guards the all-zero / empty case: a 0 denominator below would make
+    // every bar fraction NaN (0/0). Never divides by zero.
+    private var maxCount: Int { max(1, items.map(\.count).max() ?? 1) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space2) {
-            ABSectionLabel(title)
+            HStack(spacing: DesignTokens.space2) {
+                ABSectionLabel(title)
+                if let scopeNote {
+                    Text(scopeNote)
+                        .font(.abMono(DesignTokens.textXs))
+                        .foregroundStyle(DesignTokens.textGhost)
+                }
+            }
             VStack(spacing: DesignTokens.space1) {
                 ForEach(items) { item in
                     ABBreakdownRow(label: item.label, count: item.count,
@@ -96,9 +109,13 @@ struct ABBreakdownRowGroup: View {
 
     var body: some View {
         // VARIANT C: stacked vertically in the narrow side column (Arm A layout).
+        // Source/industry are windowed over the fetched leads → carry the "N of M"
+        // scope note; byStatus uses EXACT full-table counts → no note.
         VStack(alignment: .leading, spacing: DesignTokens.space2) {
-            ABBreakdownPanel(title: "By source", items: data.bySource)
-            ABBreakdownPanel(title: "By industry", items: data.byIndustry)
+            ABBreakdownPanel(title: "By source", items: data.bySource,
+                             scopeNote: data.breakdownScopeNote)
+            ABBreakdownPanel(title: "By industry", items: data.byIndustry,
+                             scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By status", items: data.byStatus,
                              colorFor: statusColor, forcedHoverLabel: forcedHoverStatusLabel)
         }

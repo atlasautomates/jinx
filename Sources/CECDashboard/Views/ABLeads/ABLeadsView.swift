@@ -14,6 +14,17 @@ struct ABLeadsView: View {
     /// leaves it false and stays genuinely scrollable (decision-log #16).
     var staticRender: Bool = false
 
+    // Live-mode hooks. All default to nil/false, so the fixture/harness path
+    // renders byte-identically to the frozen A/B artifact (nothing extra appears).
+    /// Row tap → open the lead profile. Fired only for rows carrying a DB id.
+    var onSelectLead: ((ABLeadsData.Lead) -> Void)? = nil
+    /// Manual refresh affordance. When set, a refresh control appears in the header.
+    var onRefresh: (() -> Void)? = nil
+    /// True while a live refresh is in flight — spins/disables the refresh control.
+    var isRefreshing: Bool = false
+    /// When set, a slim "showing last data" banner rides above the content.
+    var staleMessage: String? = nil
+
     var body: some View {
         ZStack(alignment: .top) {
             DesignTokens.bgRoot.ignoresSafeArea()
@@ -37,6 +48,7 @@ struct ABLeadsView: View {
     @ViewBuilder
     private var stack: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space4) {
+            if let staleMessage { ABStaleBanner(message: staleMessage) }
             header
             ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)      // level 1
             ABTrendRow(data: data)                                            // level 2
@@ -47,7 +59,8 @@ struct ABLeadsView: View {
             HStack(alignment: .top, spacing: DesignTokens.space5) {
                 ABRecentLeadsTable(leads: data.recentLeads,
                     forcedHoverIndex: interactionDemo ? 1 : nil,
-                    staticRender: staticRender)                               // level 4
+                    staticRender: staticRender,
+                    onSelect: onSelectLead)                                   // level 4
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 ABBreakdownRowGroup(data: data,
                     forcedHoverStatusLabel: interactionDemo ? "Replied" : nil) // level 3
@@ -80,6 +93,10 @@ struct ABLeadsView: View {
                 summaryStat(value: data.totals.scraped, label: "scraped", color: DesignTokens.textSecondary)
                 summaryStat(value: data.totals.emailed, label: "emailed", color: DesignTokens.accent)
                 summaryStat(value: data.totals.replies, label: "replies", color: DesignTokens.accentPink)
+                // Live only: nil in the fixture/harness path → header stays frozen.
+                if let onRefresh {
+                    ABRefreshButton(isRefreshing: isRefreshing, action: onRefresh)
+                }
             }
         }
     }
@@ -93,5 +110,34 @@ struct ABLeadsView: View {
                 .font(.adventor(DesignTokens.textSm))
                 .foregroundStyle(DesignTokens.textMuted)
         }
+    }
+}
+
+/// Header refresh affordance (live tab only). Hover lifts + brightens (bible §6);
+/// while a refresh is in flight it spins and disables. The spin is state-driven
+/// feedback, not idle motion — it stops the moment the load lands.
+private struct ABRefreshButton: View {
+    let isRefreshing: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(hovering ? DesignTokens.accentStrong : DesignTokens.accent)
+                .padding(DesignTokens.space2)
+                .background(Circle().fill(hovering ? DesignTokens.accentBg : Color.clear))
+                .overlay(Circle().strokeBorder(
+                    hovering ? DesignTokens.accentBorder : DesignTokens.borderDefault, lineWidth: 1))
+                .rotationEffect(.degrees(isRefreshing ? 360 : 0))
+                .animation(isRefreshing ? ABMotion.spin : ABMotion.fast, value: isRefreshing)
+        }
+        .buttonStyle(.plain)
+        .disabled(isRefreshing)
+        .scaleEffect(hovering && !isRefreshing ? 1.06 : 1.0)
+        .animation(ABMotion.fast, value: hovering)
+        .onHover { hovering = $0 }
+        .help("Refresh leads")
     }
 }

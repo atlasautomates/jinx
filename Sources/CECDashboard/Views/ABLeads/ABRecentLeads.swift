@@ -48,8 +48,11 @@ struct ABStatusPill: View {
 private struct ABLeadRow: View {
     let lead: ABLeadsData.Lead
     var forcedHover: Bool = false
+    /// Row tap → open the lead profile. nil (or a fixture row with no DB id) = inert.
+    var onSelect: ((ABLeadsData.Lead) -> Void)? = nil
     @State private var hovering = false
     private var active: Bool { hovering || forcedHover }
+    private var selectable: Bool { onSelect != nil && lead.leadID != nil }
 
     private var marker: Color {
         ABStatusRole(lead.status) == .reward ? DesignTokens.accentPink : DesignTokens.accent
@@ -99,6 +102,7 @@ private struct ABLeadRow: View {
         .contentShape(Rectangle())
         .animation(ABMotion.fast, value: active)
         .onHover { hovering = $0 }
+        .onTapGesture { if selectable { onSelect?(lead) } }
     }
 }
 
@@ -108,6 +112,8 @@ struct ABRecentLeadsTable: View {
     /// Offscreen render can't capture ScrollView content — swap to a clipped
     /// stack that cuts off mid-list (implying more, "scroll for more").
     var staticRender: Bool = false
+    /// Row tap → open the lead profile (live tab); nil in the fixture/harness path.
+    var onSelect: ((ABLeadsData.Lead) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space3) {
@@ -134,7 +140,7 @@ struct ABRecentLeadsTable: View {
     private var rowsStack: some View {
         LazyVStack(spacing: 1) {
             ForEach(Array(leads.enumerated()), id: \.element.id) { idx, lead in
-                ABLeadRow(lead: lead, forcedHover: forcedHoverIndex == idx)
+                ABLeadRow(lead: lead, forcedHover: forcedHoverIndex == idx, onSelect: onSelect)
             }
         }
     }

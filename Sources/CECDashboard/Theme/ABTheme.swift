@@ -32,6 +32,14 @@ enum ABMotion {
     static var fast: Animation { smooth(DesignTokens.durationFast) }
     static var normal: Animation { smooth(DesignTokens.durationNormal) }
     static var medium: Animation { smooth(DesignTokens.durationMedium) }
+
+    /// One full rotation of the in-progress spinner. Not in the generated token set
+    /// (a continuous-loop cadence has no CSS-duration analogue), so it lives here in
+    /// the motion helper layer rather than as an inline literal at the call site.
+    static let spinDuration: TimeInterval = 0.9
+    /// Continuous rotation while a load is in flight (state-driven — stops when the
+    /// bound flag flips; see the refresh button). Never idle motion.
+    static var spin: Animation { .linear(duration: spinDuration).repeatForever(autoreverses: false) }
 }
 
 // MARK: - Elevated surface (one overhead light source, bible §5)

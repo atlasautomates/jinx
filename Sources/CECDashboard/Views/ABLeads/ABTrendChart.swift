@@ -18,7 +18,9 @@ struct ABTrendChart: View {
 
     private var latest: Int { values.last ?? 0 }
     private var total: Int { values.reduce(0, +) }
-    private var peak: Int { values.max() ?? 1 }
+    // max(1, …) guards the all-zero / empty series: `peak` is the plot's divisor
+    // (maxV below), so a 0 here would make every plotted y NaN. Never divides by zero.
+    private var peak: Int { max(1, values.max() ?? 1) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space3) {

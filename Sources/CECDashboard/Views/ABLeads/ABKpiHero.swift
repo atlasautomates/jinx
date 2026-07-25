@@ -89,7 +89,10 @@ struct ABKpiCard: View {
                 Capsule()
                     .fill(LinearGradient(colors: [accent, accentStrong],
                                          startPoint: .leading, endPoint: .trailing))
-                    .frame(width: max(6, geo.size.width * CGFloat(percent / 100.0)))
+                    // Clamp the fill fraction to [0,1] — a ratio can legitimately
+                    // exceed 100% (e.g. reply events vs a small emailed base) and
+                    // must never overrun its track.
+                    .frame(width: max(6, geo.size.width * CGFloat(min(1.0, max(0.0, percent / 100.0)))))
                     // VARIANT C: flat neon fill — no bloom (glow is hero-numeral only).
             }
         }
@@ -107,7 +110,10 @@ struct ABKpiHeroRow: View {
             ABKpiCard(role: .hero,
                       percent: data.emailedOfScrapedPct,
                       caption: "Emailed of scraped",
-                      numerator: data.totals.emailed, denominator: data.totals.scraped,
+                      // Denominator matches the ratio's grain: exact total normally,
+                      // or the fetched window in the degraded fallback (F7).
+                      numerator: data.totals.emailed,
+                      denominator: data.emailedDenominator ?? data.totals.scraped,
                       numeratorLabel: "emailed", denominatorLabel: "scraped",
                       forcedPressed: forcedPressedHero)
                 .frame(maxWidth: .infinity)   // hero flexes wide (bible §1 single focus)

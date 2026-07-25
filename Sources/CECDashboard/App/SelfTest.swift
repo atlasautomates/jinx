@@ -197,6 +197,9 @@ enum SelfTest {
         // ── Pipeline tab: PipelineRepository.compose + PipelineBuilder ──────────────
         problems.append(contentsOf: pipelineChecks())
 
+        // ── Leads tab: live DashboardInputs → ABLeadsData mapping (pure/total) ──────
+        problems.append(contentsOf: abLeadsMappingChecks())
+
         let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
@@ -205,6 +208,100 @@ enum SelfTest {
             FileHandle.standardError.write(Data("SELFTEST FAIL — \(summary)\n  - \(problems.joined(separator: "\n  - "))\n".utf8))
             exit(1)
         }
+    }
+
+    /// Exercises the live→ABLeads mapping (`ABLeadsData(inputs:)`): funnel math is
+    /// guarded (no NaN on zero denominators), the reskin carries the DB id needed to
+    /// open a profile, nil lead fields are tolerated, weekly series bucket correctly,
+    /// and empty/degraded inputs never crash. Pins the divisor-guard bug class.
+    private static func abLeadsMappingChecks() -> [String] {
+        var problems: [String] = []
+
+        // Fixed clock so the now-anchored 12-week window is deterministic forever.
+        let now = DateParse.iso("2026-07-24T12:00:00+00:00") ?? Date()
+        let leads: [LeadRow] = [
+            LeadRow(id: "a", companyName: "Acme", firstName: "Ada", industry: "Auto",
+                    leadSource: "sales-nav", city: "Tampa", state: "FL",
+                    createdAt: "2026-07-01T12:00:00+00:00", enrichmentStage: "campaigned"),
+            LeadRow(id: "b", companyName: nil, firstName: nil, industry: nil,
+                    leadSource: nil, city: nil, state: nil,
+                    createdAt: "2026-07-08T12:00:00+00:00", enrichmentStage: "scraped"),
+        ]
+        // Lead "a" messaged TWICE in one week + lead "b" once → distinct-per-week = 2.
+        let sends = [
+            DashboardInputs.SentEvent(leadID: "a", sentAt: "2026-07-14T09:00:00+00:00"),
+            DashboardInputs.SentEvent(leadID: "a", sentAt: "2026-07-15T09:00:00+00:00"),
+            DashboardInputs.SentEvent(leadID: "b", sentAt: "2026-07-15T09:00:00+00:00"),
+        ]
+        let inputs = DashboardInputs(
+            leads: leads, totalCount: 200,
+            statusCounts: ["campaigned": 80, "scraped": 120],
+            replyCount: 16, messagedSends: sends)
+        let d = ABLeadsData(inputs: inputs, now: now)
+
+        if d.totals.scraped != 200 { problems.append("abmap: scraped must be totalCount (got \(d.totals.scraped))") }
+        if d.totals.emailed != 80 { problems.append("abmap: emailed must be statusCounts[campaigned] (got \(d.totals.emailed))") }
+        if d.totals.replies != 16 { problems.append("abmap: replies must be replyCount/distinct replied leads (got \(d.totals.replies))") }
+        if abs(d.emailedOfScrapedPct - 40.0) > 0.001 { problems.append("abmap: emailedOfScrapedPct math (got \(d.emailedOfScrapedPct))") }
+        if abs(d.repliesOfEmailedPct - 20.0) > 0.001 { problems.append("abmap: repliesOfEmailedPct math (got \(d.repliesOfEmailedPct))") }
+        if d.recentLeads.first?.leadID != "a" { problems.append("abmap: recent lead must carry the DB id for profile-open") }
+        if d.recentLeads.count != 2 { problems.append("abmap: recentLeads count (got \(d.recentLeads.count))") }
+        if d.recentLeads.last?.company != "Unknown" { problems.append("abmap: nil company_name must render as Unknown") }
+        if d.recentLeads.first?.location != "Tampa, FL" { problems.append("abmap: location must join city/state") }
+        if d.recentLeads.last?.location != "—" { problems.append("abmap: nil city/state must render as em dash") }
+        if d.leadsAddedWeekly.values.reduce(0, +) != 2 { problems.append("abmap: added-weekly must total the leads") }
+        // F3: distinct leads per week — lead "a" messaged twice in one week counts once.
+        if d.leadsMessagedWeekly.values.reduce(0, +) != 2 {
+            problems.append("abmap: messaged-weekly must count DISTINCT leads/week (got \(d.leadsMessagedWeekly.values.reduce(0, +)))")
+        }
+        // F4: both trends share one now-anchored 12-week axis (identical week labels).
+        if d.leadsAddedWeekly.weeks.count != 12 || d.leadsMessagedWeekly.weeks.count != 12 {
+            problems.append("abmap: trends must be exactly 12 buckets (got \(d.leadsAddedWeekly.weeks.count)/\(d.leadsMessagedWeekly.weeks.count))")
+        }
+        if d.leadsAddedWeekly.weeks != d.leadsMessagedWeekly.weeks {
+            problems.append("abmap: added/messaged trends must share an identical x-axis")
+        }
+        if d.leadsAddedWeekly.weeks.count != d.leadsAddedWeekly.values.count { problems.append("abmap: added-weekly weeks/values length mismatch") }
+        // F2: windowed breakdown discloses its scope (200 total > 2 fetched).
+        if d.breakdownScopeNote != "2 of 200" { problems.append("abmap: windowed breakdowns must carry a scope note (got \(d.breakdownScopeNote ?? "nil"))") }
+        // F4: an out-of-window outlier timestamp must not shift/blank the axis.
+        let outlier = ABLeadsData(inputs: DashboardInputs(
+            leads: [LeadRow(id: "x", companyName: "Old", firstName: nil, industry: nil,
+                            leadSource: nil, city: nil, state: nil,
+                            createdAt: "2001-01-01T00:00:00+00:00", enrichmentStage: "scraped")],
+            totalCount: 1), now: now)
+        if outlier.leadsAddedWeekly.weeks.count != 12 || outlier.leadsAddedWeekly.values.reduce(0, +) != 0 {
+            problems.append("abmap: out-of-window timestamp must yield a zero-filled 12-week axis, not shift it")
+        }
+
+        // Divisor safety (the pinned bug class): all-zero / empty inputs — no NaN, no crash.
+        let empty = ABLeadsData(inputs: DashboardInputs(leads: [], totalCount: 0), now: now)
+        if empty.emailedOfScrapedPct != 0 || empty.repliesOfEmailedPct != 0 {
+            problems.append("abmap: empty inputs must yield 0% ratios")
+        }
+        if empty.emailedOfScrapedPct.isNaN || empty.repliesOfEmailedPct.isNaN {
+            problems.append("abmap: ratios must never be NaN")
+        }
+        if empty.leadsAddedWeekly.values.reduce(0, +) != 0 { problems.append("abmap: empty leads → zero added series") }
+        if !empty.recentLeads.isEmpty { problems.append("abmap: empty leads → empty recent list") }
+        if !empty.bySource.isEmpty || !empty.byStatus.isEmpty { problems.append("abmap: empty leads → empty breakdowns") }
+        if empty.breakdownScopeNote != nil { problems.append("abmap: complete/empty data → no scope note") }
+
+        // F7: empty statusCounts → emailed windowed AND ratio denominator windowed to
+        // the same grain (1 campaigned of 2 fetched = 50%, not 1/200).
+        let windowed = ABLeadsData(inputs: DashboardInputs(leads: leads, totalCount: 200), now: now)
+        if windowed.totals.emailed != 1 {
+            problems.append("abmap: empty statusCounts → windowed campaigned count (got \(windowed.totals.emailed))")
+        }
+        if windowed.emailedDenominator != 2 || abs(windowed.emailedOfScrapedPct - 50.0) > 0.001 {
+            problems.append("abmap: windowed fallback ratio must use the windowed denominator (got \(windowed.emailedOfScrapedPct)% / denom \(windowed.emailedDenominator ?? -1))")
+        }
+
+        // percent() choke-point is total: negative/zero denominators never divide-by-zero.
+        if ABLeadsData.percent(5, of: 0) != 0 { problems.append("abmap: percent(_, of: 0) must be 0") }
+        if abs(ABLeadsData.percent(1, of: 4) - 25.0) > 0.001 { problems.append("abmap: percent math") }
+
+        return problems
     }
 
     /// Exercises the Leads compose seam (P1): supplementary results carry an `ok`

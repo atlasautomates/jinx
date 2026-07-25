@@ -31,6 +31,11 @@ enum SupabaseCheck {
                 async let leadsProbeTask = repo.recentLeads(limit: 1)
                 async let tiersTask = repo.tierCounts()
                 async let sentimentTask = repo.sentimentCounts()
+                // Leads-tab KPI/trend reads added with the ABLeads re-skin — both
+                // fail-open, so this probe surfaces an empty/degraded read that the
+                // tab would otherwise absorb silently.
+                async let repliesTask = repo.replyCountResult()
+                async let messagedTask = repo.messagedSendsResult()
                 async let runsTask = pipeRepo.recentRuns()
                 async let eventsTask: [PipelineLeadEventRow]? = try? pipeRepo.leadEvents(
                     leadId: "00000000-0000-0000-0000-000000000000") // shape/RLS probe; expect []
@@ -49,6 +54,8 @@ enum SupabaseCheck {
                 let events = await eventsTask
                 let interactionsOK = await interactionsTask
                 let backlogOK = await backlogTask
+                let replyCount = await repliesTask
+                let messaged = await messagedTask
                 // Stage read depends on run ids — the one sequential follow-up.
                 let (stageRows, stagesOK) = await pipeRepo.stageRuns(
                     runIds: runs.prefix(3).map(\.runId))
@@ -65,9 +72,13 @@ enum SupabaseCheck {
                        : ", lead_interactions read FAILED (missing lead_interactions_anon_read migration?)")
                     + (backlogOK ? ", backlog tables readable"
                        : ", backlog tables UNREADABLE (campaign_leads / v_campaign_ready)")
+                let leadsKpiStr = "leads-kpi: replied-leads=\(replyCount)"
+                    + (replyCount == 0 ? " (EMPTY — no replies / no RLS)" : "")
+                    + ", sent(send_queue ≤13wk)=\(messaged.count) email(s) to \(Set(messaged.map(\.leadID)).count) lead(s)"
+                    + (messaged.isEmpty ? " (EMPTY — no sends / no RLS on send_queue)" : "")
                 result.message = "reached \(client.baseURL.host ?? "supabase"), "
                     + "\(leadsProbe.count) lead(s) sampled (full select incl. enrichment_stage)"
-                    + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)"
+                    + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)\n  \(leadsKpiStr)"
             } catch {
                 result.message = error.localizedDescription
             }

@@ -12,12 +12,15 @@ struct LeadsRepository {
         async let leads = recentLeads()
         async let tiers = tierCountsResult()
         async let sentiment = sentimentCountsResult()
+        async let replies = replyCountResult()
+        async let messaged = messagedSendsResult()
         let total = try await totalCount()   // statusCounts derives its residual from the exact total
         async let status = statusCountsResult(totalCount: total)
         return try await Self.compose(
             leads: leads, totalCount: total,
             tiers: await tiers, sentiment: await sentiment,
-            status: await status)
+            status: await status,
+            replyCount: await replies, messagedSends: await messaged)
     }
 
     /// Pure packaging seam (selftest target): supplementary results carry an `ok`
@@ -29,13 +32,17 @@ struct LeadsRepository {
         leads: [LeadRow], totalCount: Int,
         tiers: (counts: [String: Int], ok: Bool),
         sentiment: (counts: [String: Int], ok: Bool),
-        status: (counts: [String: Int], ok: Bool) = ([:], ok: false)
+        status: (counts: [String: Int], ok: Bool) = ([:], ok: false),
+        replyCount: Int = 0,
+        messagedSends: [DashboardInputs.SentEvent] = []
     ) -> DashboardInputs {
         DashboardInputs(leads: leads, totalCount: totalCount,
                         tierCounts: tiers.counts,
                         sentimentCounts: sentiment.counts,
                         statusCounts: status.ok ? status.counts : [:],
-                        partial: !tiers.ok || !sentiment.ok)
+                        partial: !tiers.ok || !sentiment.ok,
+                        replyCount: replyCount,
+                        messagedSends: messagedSends)
     }
 
     /// Exact total number of leads in the table.
@@ -63,6 +70,50 @@ struct LeadsRepository {
     /// Counts of `replies.sentiment`. Fail-open.
     func sentimentCountsResult() async -> (counts: [String: Int], ok: Bool) {
         await columnCounts(table: "replies", column: "sentiment")
+    }
+
+    /// DISTINCT count of leads that replied (`replies.lead_id`, deduped via the paged
+    /// tally — same lead grain as the campaigned-stage "emailed" count, so the
+    /// reply-rate ratio is leads/leads and can't exceed 100% on multi-reply threads).
+    /// Supplementary → fail-open to 0 (an unreadable `replies` table degrades the KPI
+    /// to 0, never fails the load).
+    func replyCountResult() async -> Int {
+        await columnCounts(table: "replies", column: "lead_id").counts.count
+    }
+
+    /// SENT emails over the last `weeks` weeks (`send_queue`, `status=sent`), each
+    /// carrying its `lead_id` so the trend can count DISTINCT leads messaged per week
+    /// rather than send steps. Newest first, so a >1000-row window keeps the most
+    /// recent weeks (the right edge of the trend) complete. Supplementary →
+    /// fail-open to empty (the trend then renders as an empty series, guarded
+    /// downstream). NOTE: the cutoff is emitted by a plain `ISO8601DateFormatter`
+    /// (default GMT, `…Z` suffix, no `+`), which `URLComponents` passes through
+    /// unmangled — do not switch it to a `+00:00` form or the `gte` filter breaks.
+    func messagedSendsResult(weeks: Int = 13, limit: Int = 1000) async -> [DashboardInputs.SentEvent] {
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
+        let cutoff = cal.date(byAdding: .weekOfYear, value: -max(1, weeks), to: Date()) ?? Date.distantPast
+        let cutoffStr = ISO8601DateFormatter().string(from: cutoff)
+        do {
+            let data = try await client.get("send_queue", [
+                URLQueryItem(name: "select", value: "lead_id,sent_at"),
+                URLQueryItem(name: "status", value: "eq.sent"),
+                URLQueryItem(name: "sent_at", value: "gte.\(cutoffStr)"),
+                URLQueryItem(name: "order", value: "sent_at.desc"),
+                URLQueryItem(name: "limit", value: String(max(1, limit))),
+            ])
+            guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                return []
+            }
+            return rows.compactMap { row in
+                guard let lead = row["lead_id"] as? String,
+                      let sent = row["sent_at"] as? String else { return nil }
+                return DashboardInputs.SentEvent(leadID: lead, sentAt: sent)
+            }
+        } catch {
+            NSLog("LeadsRepository: send_queue read failed (\(error.localizedDescription)); messaged trend omitted")
+            return []
+        }
     }
 
     /// The four pipeline stages the enrichment layer writes (the DB's forward-only

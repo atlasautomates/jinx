@@ -9,9 +9,14 @@ struct ABLeadsData {
     struct Series { let weeks: [String]; let values: [Int] }
     struct Breakdown: Identifiable { let label: String; let count: Int; var id: String { label } }
     struct Lead: Identifiable {
+        // DB id — nil for the frozen fixture; set from the live pipeline so a row
+        // tap can open the lead profile. Identity prefers it (unique per lead);
+        // the fixture falls back to `company` (unique within the fixture).
+        var leadID: String? = nil
         let company: String; let industry: String; let location: String
         let source: String; let status: String; let added: String
-        var id: String { company }
+        var firstName: String? = nil
+        var id: String { leadID ?? company }
     }
 
     let totals: Totals
@@ -23,6 +28,14 @@ struct ABLeadsData {
     let byIndustry: [Breakdown]
     let byStatus: [Breakdown]
     let recentLeads: [Lead]
+    /// Denominator behind `emailedOfScrapedPct` — normally `totals.scraped` (exact),
+    /// but the windowed fallback (exact stage read failed) narrows it to the fetched
+    /// window so the hero ratio stays leads/leads at one grain. nil in the fixture.
+    var emailedDenominator: Int? = nil
+    /// "N of M" when the source/industry breakdowns are computed over a fetched
+    /// window smaller than the true total — surfaced so a windowed slice is never
+    /// presented as a full-table total. nil (no note) in the fixture / when complete.
+    var breakdownScopeNote: String? = nil
 
     static let ab = ABLeadsData(
         totals: .init(scraped: 1240, emailed: 861, replies: 74),
@@ -96,9 +109,207 @@ enum ABStatusRole {
     init(_ status: String) {
         switch status.lowercased() {
         case "replied":                       self = .reward
-        case "emailed":                       self = .active
+        // "campaigned" is the live pipeline's outreach stage (= emailed).
+        case "emailed", "campaigned":         self = .active
         case "bounced", "do not contact":     self = .warn
         default:                              self = .neutral
         }
+    }
+}
+
+// MARK: - Live mapping (Supabase pipeline → the frozen ABLeads shape)
+
+extension ABLeadsData {
+    /// Build the Leads-tab view model from the live dashboard pipeline
+    /// (`LeadsRepository.fetch()` → `DashboardInputs`). PURE and TOTAL: no I/O, no
+    /// force-unwraps; every divisor is guarded and empty/degraded inputs are
+    /// tolerated (all-zero series, nil fields, failed supplementary reads).
+    ///
+    /// Mapping decisions (documented in SHIP-NOTES.md):
+    /// - `scraped`  = exact full-table lead count (`totalCount`).
+    /// - `emailed`  = distinct leads that reached the `campaigned` enrichment stage
+    ///   (added to an outbound campaign). Exact when the full-table stage counts are
+    ///   present; else a windowed fallback from the fetched leads — and then the
+    ///   ratio denominator narrows to the same window so it stays leads/leads.
+    /// - `replies`  = distinct replied leads (`inputs.replyCount`, fail-open to 0),
+    ///   the same grain as `emailed`, so the reply rate can't exceed 100% on
+    ///   multi-reply threads.
+    /// - weekly series share ONE 12-week window anchored to `now` (aligned axes):
+    ///   added counts distinct leads by `created_at`; messaged counts DISTINCT leads
+    ///   per week by `send_queue.sent_at`. Both fail-open to a zero-filled series.
+    /// - breakdowns come from the fetched leads window (with a "N of M" scope note
+    ///   when windowed) / exact stage counts.
+    ///
+    /// `now` is injectable for deterministic tests; production passes the wall clock.
+    init(inputs: DashboardInputs, now: Date = Date()) {
+        let scraped = inputs.totalCount
+        // Exact per-lead campaigned count when the full-table stage read succeeded;
+        // else a windowed fallback (and the ratio denominator narrows to match).
+        let usedWindowedEmailed = inputs.statusCounts.isEmpty
+        let emailed: Int = usedWindowedEmailed
+            ? inputs.leads.filter { ($0.enrichmentStage ?? "").lowercased() == "campaigned" }.count
+            : (inputs.statusCounts["campaigned"] ?? 0)
+        let ratioDenominator = usedWindowedEmailed ? inputs.leads.count : scraped
+        let replies = max(0, inputs.replyCount)
+
+        self.totals = Totals(scraped: scraped, emailed: emailed, replies: replies)
+        self.emailedDenominator = ratioDenominator
+        self.emailedOfScrapedPct = ABLeadsData.percent(emailed, of: ratioDenominator)
+        self.repliesOfEmailedPct = ABLeadsData.percent(replies, of: emailed)
+
+        self.leadsAddedWeekly = ABLeadsData.weeklySeries(
+            timestamps: inputs.leads.compactMap { $0.createdAt }, weeks: 12, now: now)
+        self.leadsMessagedWeekly = ABLeadsData.weeklySeries(
+            events: inputs.messagedSends, weeks: 12, now: now)
+
+        self.bySource = ABLeadsData.breakdown(inputs.leads, topN: 6) { $0.leadSource }
+        self.byIndustry = ABLeadsData.breakdown(inputs.leads, topN: 6) { $0.industry }
+        self.byStatus = ABLeadsData.statusBreakdown(inputs)
+        // Source/industry are windowed over the fetched leads; disclose it when the
+        // window is smaller than the true total (byStatus uses exact counts — no note).
+        self.breakdownScopeNote = inputs.totalCount > inputs.leads.count
+            ? "\(inputs.leads.count) of \(inputs.totalCount)" : nil
+
+        self.recentLeads = inputs.leads.prefix(50).map { row in
+            Lead(leadID: row.id,
+                 company: row.companyName?.nilIfEmpty ?? "Unknown",
+                 industry: row.industry?.nilIfEmpty ?? "—",
+                 location: ABLeadsData.locationLabel(city: row.city, state: row.state),
+                 source: row.leadSource?.nilIfEmpty ?? "—",
+                 status: ABLeadsData.stageLabel(row.enrichmentStage),
+                 added: ABLeadsData.dayLabel(row.createdAt),
+                 firstName: row.firstName?.nilIfEmpty)
+        }
+    }
+
+    /// `n/d` as a percentage, guarded: a zero (or negative) denominator yields 0,
+    /// never NaN/inf. The single choke-point for both KPI ratios.
+    static func percent(_ n: Int, of d: Int) -> Double {
+        d > 0 ? (Double(n) / Double(d)) * 100.0 : 0
+    }
+
+    private static func locationLabel(city: String?, state: String?) -> String {
+        let parts = [city, state].compactMap { $0?.nilIfEmpty }
+        return parts.isEmpty ? "—" : parts.joined(separator: ", ")
+    }
+
+    /// Locale-stable display casing for a stage token; nil/empty → "Unknown".
+    static func stageLabel(_ stage: String?) -> String {
+        guard let s = stage?.nilIfEmpty else { return "Unknown" }
+        return s.capitalized(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// `created_at` timestamp → a stable "yyyy-MM-dd" day label (matching the
+    /// fixture's `added` format); unparseable/nil → "—".
+    private static func dayLabel(_ iso: String?) -> String {
+        guard let date = DateParse.iso(iso) else { return "—" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+
+    /// Count a categorical lead field (nil/empty → "Unknown"), largest first
+    /// (ties broken by label for determinism), capped at `topN` with the tail
+    /// folded into a neutral "Other".
+    private static func breakdown(
+        _ leads: [LeadRow], topN: Int, value: (LeadRow) -> String?
+    ) -> [Breakdown] {
+        var counts: [String: Int] = [:]
+        for lead in leads {
+            let key = value(lead)?.nilIfEmpty ?? "Unknown"
+            counts[key, default: 0] += 1
+        }
+        return topBreakdowns(counts, topN: topN)
+    }
+
+    /// Status breakdown from the EXACT full-table stage counts when present
+    /// (a recency window skews a pipeline-stage distribution toward "scraped");
+    /// else a windowed rollup from the fetched leads.
+    private static func statusBreakdown(_ inputs: DashboardInputs) -> [Breakdown] {
+        if !inputs.statusCounts.isEmpty {
+            // uniquingKeysWith (not uniqueKeysWithValues) — two stage tokens that
+            // ever collapse to the same display label must MERGE, never trap.
+            let labeled = Dictionary(inputs.statusCounts.map { (stageLabel($0.key), $0.value) },
+                                     uniquingKeysWith: +)
+            return topBreakdowns(labeled, topN: 8)
+        }
+        return breakdown(inputs.leads, topN: 8) { $0.enrichmentStage }
+    }
+
+    private static func topBreakdowns(_ counts: [String: Int], topN: Int) -> [Breakdown] {
+        let sorted = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        var out = sorted.prefix(topN).map { Breakdown(label: $0.key, count: $0.value) }
+        if sorted.count > topN {
+            let other = sorted.dropFirst(topN).reduce(0) { $0 + $1.value }
+            if other > 0 {
+                // Merge into an existing "Other" (a real category literally named
+                // "Other") rather than appending a duplicate — Breakdown.id is the
+                // label, so a duplicate would collide in ForEach identity.
+                if let i = out.firstIndex(where: { $0.label == "Other" }) {
+                    out[i] = Breakdown(label: "Other", count: out[i].count + other)
+                } else {
+                    out.append(Breakdown(label: "Other", count: other))
+                }
+            }
+        }
+        return out
+    }
+
+    /// Distinct leads (each `created_at` is one lead) bucketed into a `weeks`-long
+    /// window anchored to `now`.
+    static func weeklySeries(timestamps: [String], weeks: Int, now: Date = Date()) -> Series {
+        weekBuckets(timestamps.compactMap { DateParse.iso($0).map { ($0, String?.none) } },
+                    weeks: weeks, now: now)
+    }
+
+    /// Distinct LEADS messaged per week (dedup by `lead_id` within a week) over the
+    /// same `now`-anchored window — so a lead messaged twice in a week counts once
+    /// and the two trend charts share an identical x-axis.
+    static func weeklySeries(events: [DashboardInputs.SentEvent], weeks: Int, now: Date = Date()) -> Series {
+        weekBuckets(events.compactMap { e in DateParse.iso(e.sentAt).map { ($0, Optional(e.leadID)) } },
+                    weeks: weeks, now: now)
+    }
+
+    /// Core weekly bucketer. Produces EXACTLY `weeks` consecutive ISO-week buckets
+    /// (UTC) ending at the week containing `now`, zero-filled — so the x-axis is
+    /// fixed and clock-anchored, out-of-window timestamps (stray/outlier dates) are
+    /// simply ignored rather than shifting the visible window, and two series over
+    /// the same `now` align bucket-for-bucket. Items with a non-nil dedup key count
+    /// once per (week, key).
+    private static func weekBuckets(_ items: [(date: Date, key: String?)],
+                                    weeks: Int, now: Date) -> Series {
+        let n = max(1, weeks)
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
+
+        let nowComps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+        guard let thisWeek = cal.date(from: nowComps) else { return Series(weeks: [], values: []) }
+
+        var weekStarts: [Date] = []
+        for i in stride(from: n - 1, through: 0, by: -1) {   // oldest → newest
+            if let d = cal.date(byAdding: .weekOfYear, value: -i, to: thisWeek) { weekStarts.append(d) }
+        }
+        let index = Dictionary(weekStarts.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        var values = [Int](repeating: 0, count: weekStarts.count)
+        var seen = Set<String>()   // "<weekIdx>|<key>" for distinct-per-week dedup
+
+        for item in items {
+            let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: item.date)
+            guard let ws = cal.date(from: comps), let idx = index[ws] else { continue }  // outside window
+            if let key = item.key {
+                let token = "\(idx)|\(key)"
+                if seen.contains(token) { continue }
+                seen.insert(token)
+            }
+            values[idx] += 1
+        }
+
+        let label = DateFormatter()
+        label.locale = Locale(identifier: "en_US_POSIX")
+        label.dateFormat = "MMM d"
+        label.timeZone = cal.timeZone
+        return Series(weeks: weekStarts.map { label.string(from: $0) }, values: values)
     }
 }
