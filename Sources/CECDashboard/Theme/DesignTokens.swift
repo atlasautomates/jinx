@@ -32,6 +32,10 @@ enum Palette {
     static let bgRoot = Color(hex: "050508")
     static let bgSurface = Color(hex: "0a0a10")
     static let bgElevated = Color(hex: "101010")
+    /// One step above `bgElevated`, for transient hover/highlight surfaces —
+    /// mirrors the generated system's `bgHighlight`. Without it, hover on an
+    /// already-elevated block has nowhere to go and reads as no response at all.
+    static let bgHighlight = Color(hex: "1a1a24")
 
     static let textPrimary = Color(hex: "f0f0f5")
     static let textSecondary = Color(hex: "c0c0d8")

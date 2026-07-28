@@ -21,12 +21,105 @@ enum PreviewRegistry {
         // interaction-demo variant: pressed hero card + hovered recent row +
         // hovered "Replied" status bar — proves hover/press states in a still.
         "leads-detail": { AnyView(ABLeadsView(data: .ab, interactionDemo: true, staticRender: true)) },
+        // Lead dossier at rest, then with the click-to-copy affordance forced:
+        // Industry hovered (glyph + lifted surface), Email just copied.
+        "profile":      { AnyView(LeadProfileFixture.view()) },
+        "profile-copy": { AnyView(LeadProfileFixture.view(
+            demo: LeadProfileFixture.copyDemo)) },
     ]
+}
+
+/// Deliberately ungated AppKit view — the placeholder detector's positive
+/// control. `ImageRenderer` cannot rasterize it, which is exactly the point.
+private struct UngatedAppKitProbe: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 @MainActor
 enum PreviewHarness {
     private static let MAX_RENDER_PIXELS = 8192
+
+    /// SwiftUI's "unsupported view" placeholder — the opaque yellow block
+    /// ImageRenderer paints where an `NSViewRepresentable` should be. Sampled
+    /// from a real placeholder render; nothing in the palette comes near it.
+    static let placeholderYellow = (r: 255, g: 204, b: 0)
+
+    /// A clean render scores EXACTLY 0, so any hit at all is a real placeholder.
+    /// A slack threshold defeats the guard: a small ungated control (the ~16pt
+    /// opener/offer copy glyphs) scores ~100, which a threshold of 200 waved
+    /// through. Small headroom only, for anti-aliasing.
+    static let placeholderTolerance = 8
+
+    /// Renders one registry view and counts placeholder-yellow pixels.
+    ///
+    /// This is the deterministic pin behind `\.isStaticRender`: an AppKit-backed
+    /// child added to a previewable view destroys every still it appears in, and
+    /// nothing else notices — `--selftest` passes and `--screenshot` exits 0
+    /// while painting a yellow block over the content. `--selftest` calls this
+    /// for every registered view so the class fails loudly instead.
+    static func placeholderPixels(in view: String) -> Int? {
+        guard let builder = PreviewRegistry.views[view] else { return nil }
+        return placeholderPixels(rendering: AnyView(builder()))
+    }
+
+    /// Positive control: a deliberately UNGATED `NSViewRepresentable` must score
+    /// above the threshold. Without this, "0 hits" conflates *clean* with
+    /// *detector blind* — if a future macOS changes the placeholder shade, every
+    /// view silently scores 0 and the guard is dead with the suite green.
+    static func detectorControlPixels() -> Int? {
+        placeholderPixels(rendering: AnyView(
+            UngatedAppKitProbe().frame(width: 120, height: 120)))
+    }
+
+    private static func placeholderPixels(rendering view: AnyView) -> Int? {
+        let content = view
+            .frame(width: PreviewRegistry.canvas.width, height: PreviewRegistry.canvas.height,
+                   alignment: .top)
+            .environment(\.colorScheme, .dark)
+            .environment(\.isStaticRender, true)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1
+        renderer.proposedSize = ProposedViewSize(PreviewRegistry.canvas)
+        var cg: CGImage?
+        if let ns = NSAppearance(named: .darkAqua) {
+            ns.performAsCurrentDrawingAppearance { cg = renderer.cgImage }
+        } else {
+            cg = renderer.cgImage
+        }
+        guard let image = cg else { return nil }
+
+        // Redraw into a canonical sRGB RGBA8 buffer rather than scanning the
+        // rep as it comes back. ImageRenderer's format is CONTENT-dependent: a
+        // view with extended-range colour returns 64bpp half-float samples, and
+        // a byte-wise scan of that reads the low/high bytes of R and the low
+        // byte of G as R/G/B — it can never match, so it returns 0, which reads
+        // as "clean" and silently disables the guard for that view. (Real case:
+        // `leads-detail` renders at 64bpp; an injected placeholder scored 9428
+        // on `profile` and 0 there.) Normalizing also pins the comparison to
+        // sRGB, the space the reference colour was sampled in.
+        let w = image.width, h = image.height
+        guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        var buf = [UInt8](repeating: 0, count: w * h * 4)
+        let drew: Bool = buf.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h,
+                                      bitsPerComponent: 8, bytesPerRow: w * 4,
+                                      space: space,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drew else { return nil }
+
+        var hits = 0
+        for p in stride(from: 0, to: buf.count, by: 4) {
+            if abs(Int(buf[p]) - placeholderYellow.r) <= 6,
+               abs(Int(buf[p + 1]) - placeholderYellow.g) <= 6,
+               abs(Int(buf[p + 2]) - placeholderYellow.b) <= 6 { hits += 1 }
+        }
+        return hits
+    }
 
     /// Call from App.init(). Returns only if `--screenshot` was not requested.
     static func runIfRequested() {
@@ -77,6 +170,10 @@ enum PreviewHarness {
             .frame(width: PreviewRegistry.canvas.width, height: PreviewRegistry.canvas.height,
                    alignment: .top)   // top-align so tall content overflows only at the bottom
             .environment(\.colorScheme, dark ? .dark : .light)
+            // Applies to EVERY registry entry — this is the one place that knows
+            // it's a still render. AppKit-backed children gate themselves off it
+            // (ImageRenderer paints a yellow placeholder over them instead).
+            .environment(\.isStaticRender, true)
         let ns = NSAppearance(named: dark ? .darkAqua : .aqua)
 
         let renderer = ImageRenderer(content: content)

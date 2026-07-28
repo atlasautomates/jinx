@@ -1,7 +1,11 @@
+import AppKit
 import Foundation
 
 /// Headless verification of the decode contract (run with `--selftest`).
 /// Exercises the decode contract plus every pure builder/compose seam.
+/// Main-actor: `--selftest` runs pre-boot from `App.init()` on the main thread,
+/// and the copy checks touch AppKit (`NSPasteboard`).
+@MainActor
 enum SelfTest {
     static func run() -> Never {
         guard let dash = MockData.dashboard else {
@@ -626,6 +630,237 @@ enum SelfTest {
         if ProfileRepository.sanitized("abc-123") != "abc-123"
             || ProfileRepository.sanitized("x,y(z)\"") != "xyz" {
             problems.append("profile: id sanitizer wrong")
+        }
+        problems.append(contentsOf: profileCopyChecks())
+        return problems
+    }
+
+    /// Click-to-copy: the fact list IS the clipboard payload, so pin the two
+    /// properties a view edit could silently break — the copied string equals
+    /// the rendered one, and no blank field becomes a dead copy target.
+    private static func profileCopyChecks() -> [String] {
+        var problems: [String] = []
+        func detail(location: String? = nil, city: String? = nil, state: String? = nil,
+                    jobTitle: String? = nil, bom: Bool = false) -> LeadDetailRow {
+            LeadDetailRow(id: "C1",
+                          email: bom ? "\u{FEFF}sales@acme.io" : "  sales@acme.io  ",
+                          firstName: nil,
+                          lastName: nil, fullName: nil, companyName: "Acme",
+                          jobTitle: jobTitle, companyDescription: nil,
+                          location: location, city: city, state: state,
+                          phone: "(561) 320-2842", website: "https://acme.io/",
+                          industry: bom ? "Solar en\u{00AD}ergy" : "Solar energy system service")
+        }
+
+        // FULLY POPULATED: pins the complete label set and order. Without this
+        // the blank-drop fixture below would keep passing if a field were
+        // DELETED from ProfileFacts — the dossier would silently lose a row.
+        let allContact = ProfileFacts.contact(detail(city: "Stuart", state: "Florida",
+                                                     jobTitle: "Owner"))
+        if allContact.map(\.label)
+            != ["Title", "Industry", "Location", "Phone", "Website", "Email"] {
+            problems.append("copy: contact fact set/order changed "
+                + "(\(allContact.map(\.label)))")
+        }
+
+        // Blank / whitespace-only fields are dropped; the rest keep display order.
+        let facts = ProfileFacts.contact(detail(city: "Stuart", state: "Florida",
+                                                jobTitle: "   "))
+        if facts.map(\.label) != ["Industry", "Location", "Phone", "Website", "Email"] {
+            problems.append("copy: contact facts wrong or a blank field leaked "
+                + "(\(facts.map(\.label)))")
+        }
+        // Copied == rendered: the value is the trimmed source string, never a
+        // reformatted display form (a prettified phone/URL would poison paste).
+        let byLabel = Dictionary(uniqueKeysWithValues: facts.map { ($0.label, $0.value) })
+        for (label, expected) in ["Email": "sales@acme.io",
+                                  "Phone": "(561) 320-2842",
+                                  "Website": "https://acme.io/",
+                                  "Industry": "Solar energy system service",
+                                  "Location": "Stuart, Florida"] {
+            if byLabel[label] != expected {
+                problems.append("copy: \(label) payload must be the rendered value "
+                    + "(got \(byLabel[label] ?? "nil"), want \(expected))")
+            }
+        }
+        // Location: explicit column wins; a lone city/state still composes; all
+        // three blank drops the row entirely.
+        if ProfileFacts.location(detail(location: "Stuart, FL", city: "X", state: "Y"))
+            != "Stuart, FL" {
+            problems.append("copy: explicit location column must win over city/state")
+        }
+        if ProfileFacts.location(detail(city: "Stuart")) != "Stuart" {
+            problems.append("copy: a lone city must still compose a location")
+        }
+        if ProfileFacts.contact(detail()).contains(where: { $0.label == "Location" }) {
+            problems.append("copy: no location parts must drop the row, not render blank")
+        }
+
+        // Personalization grid: same blank-drop rule, same verbatim payload.
+        let enrichment = LeadEnrichmentRow(
+            casualizedFirstName: " Ana ", casualizedCompanyName: "", casualizedCityName: nil,
+            personalizationProject: "roof retrofits", personalizationDetail: nil,
+            personalizedOpener: "opener", personalizedOffer: nil,
+            enrichmentSource: "local-web-research", enrichmentStatus: "partial",
+            leadTier: "2", webResearchJson: nil)
+        let pFacts = ProfileFacts.personalization(enrichment)
+        if pFacts.map(\.label) != ["Casual name", "Project ref", "Source", "Status"] {
+            problems.append("copy: personalization facts wrong or a blank leaked "
+                + "(\(pFacts.map(\.label)))")
+        }
+        if pFacts.first?.value != "Ana" {
+            problems.append("copy: padded values must be trimmed identically for "
+                + "display and clipboard")
+        }
+
+        // A BOM must not survive into a fact's payload (full sanitizer matrix
+        // lives in sanitizerChecks; this pins that facts route THROUGH it).
+        let hostileFacts = Dictionary(uniqueKeysWithValues:
+            ProfileFacts.contact(detail(bom: true)).map { ($0.label, $0.value) })
+        if hostileFacts["Email"] != "sales@acme.io"
+            || hostileFacts["Industry"] != "Solar energy" {
+            problems.append("copy: fact values must be sanitized, not raw "
+                + "(got \(hostileFacts["Email"]?.debugDescription ?? "nil"))")
+        }
+
+        // The still-render demo seam must only ever force the named field.
+        let demo = CopyDemo(hoverLabel: "Industry", copiedLabel: "Email")
+        if demo.state(for: "Industry") != .hover || demo.state(for: "Email") != .copied
+            || demo.state(for: "Phone") != .none {
+            problems.append("copy: CopyDemo must force state only on the named fields")
+        }
+        if CopyDemo().state(for: "Email") != .none {
+            problems.append("copy: an empty CopyDemo must force nothing (live default)")
+        }
+        // An unset label is "", which must match nothing rather than colliding.
+        if CopyDemo(hoverLabel: "", copiedLabel: "").state(for: "") != .none {
+            problems.append("copy: an empty demo label must match no field")
+        }
+        // The harness's demo labels must name REAL facts, or --screenshot
+        // profile-copy silently renders identically to profile and stops
+        // proving the affordance exists.
+        let fixtureLabels = Set(ProfileFacts.contact(LeadProfileFixture.inputs.lead)
+            .map(\.label))
+        for label in [LeadProfileFixture.copyDemo.hoverLabel,
+                      LeadProfileFixture.copyDemo.copiedLabel].compactMap({ $0 })
+            where !fixtureLabels.contains(label) {
+            problems.append("copy: harness demo label '\(label)' names no fixture "
+                + "fact — profile-copy would render identically to profile")
+        }
+
+        // The pasteboard round-trip itself, and that a write reports success.
+        if !Pasteboard.copy("selftest-probe")
+            || NSPasteboard.general.string(forType: .string) != "selftest-probe" {
+            problems.append("copy: pasteboard round-trip failed")
+        }
+        problems.append(contentsOf: sanitizerChecks())
+        problems.append(contentsOf: previewRenderChecks())
+        return problems
+    }
+
+    /// The sanitizer strips what renders as nothing and KEEPS what carries
+    /// meaning. Both halves are load-bearing: too little and invisible scrapes
+    /// poison the clipboard, too much and emoji/Persian/Indic text is corrupted.
+    private static func sanitizerChecks() -> [String] {
+        var problems: [String] = []
+        func check(_ name: String, _ input: String, _ expected: String?) {
+            let got = ProfileFacts.inlineValue(input)
+            if got != expected {
+                problems.append("copy/sanitize \(name): got \(got?.debugDescription ?? "nil") "
+                    + "want \(expected?.debugDescription ?? "nil")")
+            }
+        }
+        // Stripped — invisible and meaningless.
+        check("bom", "\u{FEFF}sales@acme.io", "sales@acme.io")
+        check("soft-hyphen", "Solar en\u{00AD}ergy", "Solar energy")
+        check("zero-width-space", "a\u{200B}b", "ab")
+        check("bidi-override", "\u{202E}moc.evil\u{202C}@x.com", "moc.evil@x.com")
+        check("lrm", "x\u{200E}y", "xy")
+        check("word-joiner", "a\u{2060}b", "ab")
+        // Collapsed — a one-line field must paste as one line, and a tab is a
+        // word boundary that must never be deleted outright.
+        check("newline", "https://acme.io/\nrm -rf ~", "https://acme.io/ rm -rf ~")
+        check("tab", "Hi\tthere", "Hi there")
+        check("line-separator", "a\u{2028}b", "a b")
+        // CRLF is ONE break: sweeping CR in with tab double-spaced every line of
+        // Windows/CSV-sourced text (caught in delta review round 2).
+        check("crlf", "a\r\nb", "a b")
+        check("lone-cr", "a\rb", "a b")
+        // The "invisible character" generators' favourites.
+        check("hangul-filler", "Acme\u{3164}Solar", "AcmeSolar")
+        check("arabic-letter-mark", "x\u{061C}y", "xy")
+        // PRESERVED — these carry meaning; stripping them corrupts real values.
+        check("emoji-zwj", "Team 👨‍👩‍👧‍👦 Solar", "Team 👨‍👩‍👧‍👦 Solar")
+        check("emoji-vs16", "Solar ⚡️ Pros", "Solar ⚡️ Pros")
+        check("persian-zwnj", "می‌روم", "می‌روم")
+        check("accents-cjk", "Café 太陽光 Solar", "Café 太陽光 Solar")
+        // Block prose keeps line structure but loses the invisibles, and its tab
+        // handling must match the inline path (they drifted apart once).
+        if ProfileFacts.blockValue("Line one.\n\u{200B}Line two.") != "Line one.\nLine two." {
+            problems.append("copy/sanitize block: must keep newlines and drop invisibles")
+        }
+        if ProfileFacts.blockValue("Hi\tthere") != "Hi there" {
+            problems.append("copy/sanitize block: a tab must collapse, not vanish")
+        }
+        if ProfileFacts.blockValue("a\r\nb") != "a\nb" {
+            problems.append("copy/sanitize block: CRLF must be ONE newline, not a "
+                + "newline plus a stray space on every line")
+        }
+        // Mongolian free variation selectors are glyph selectors, same category
+        // as FE00-FE0F which we preserve — keep the rule internally consistent.
+        if ProfileFacts.inlineValue("\u{1820}\u{180B}") != "\u{1820}\u{180B}" {
+            problems.append("copy/sanitize: Mongolian variation selectors must be "
+                + "preserved like the other variation selectors")
+        }
+        if ProfileFacts.blockValue("Team 👨‍👩‍👧‍👦") != "Team 👨‍👩‍👧‍👦" {
+            problems.append("copy/sanitize block: emoji sequences must survive the opener")
+        }
+        // An all-invisible value is a blank row with a live copy target.
+        if ProfileFacts.inlineValue("\u{200B}\u{FEFF}\u{00AD}") != nil {
+            problems.append("copy/sanitize: an all-invisible value must drop entirely")
+        }
+        // Labels are the demo key AND half of each row's identity, across BOTH
+        // grids and the prose blocks — uniqueness must hold over the union.
+        let lead = LeadProfileFixture.inputs.lead
+        var allLabels = ProfileFacts.contact(lead).map(\.label)
+        if let e = LeadProfileFixture.inputs.enrichment {
+            allLabels += ProfileFacts.personalization(e).map(\.label)
+        }
+        allLabels += ["Opener", "Offer"]
+        if Set(allLabels).count != allLabels.count {
+            problems.append("copy: profile labels must be unique across both grids "
+                + "and the prose blocks (\(allLabels))")
+        }
+        return problems
+    }
+
+    /// Every registered preview must render without SwiftUI's "unsupported view"
+    /// placeholder. An AppKit-backed child silently destroys the still it appears
+    /// in — `--screenshot` still exits 0 — so this is the only thing that notices.
+    private static func previewRenderChecks() -> [String] {
+        var problems: [String] = []
+        // Positive control FIRST: prove the detector can still see a placeholder
+        // before trusting it to report their absence. "0 hits" must mean clean,
+        // not blind (a future macOS could change the placeholder shade).
+        switch PreviewHarness.detectorControlPixels() {
+        case nil:
+            problems.append("preview: placeholder detector control failed to render")
+        case let hits? where hits <= PreviewHarness.placeholderTolerance:
+            problems.append("preview: placeholder detector is BLIND — an ungated "
+                + "NSViewRepresentable scored only \(hits); the placeholder colour "
+                + "may have changed, so every clean result below is meaningless")
+        default:
+            break
+        }
+        for name in PreviewRegistry.views.keys.sorted() {
+            guard let hits = PreviewHarness.placeholderPixels(in: name) else {
+                problems.append("preview: '\(name)' failed to render")
+                continue
+            }
+            if hits > PreviewHarness.placeholderTolerance {
+                problems.append("preview: '\(name)' renders \(hits) placeholder-yellow "
+                    + "pixels — an AppKit-backed view is not gated on \\.isStaticRender")
+            }
         }
         return problems
     }
