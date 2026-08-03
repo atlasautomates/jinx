@@ -16,6 +16,14 @@ enum PreviewRegistry {
     // Fixed logical canvas for the A/B comparison.
     static let canvas = CGSize(width: 1440, height: 1000)
 
+    /// Views that are not tab stills and need their own canvas.
+    static let canvases: [String: CGSize] = [
+        // Apple's macOS icon grid.
+        "app-icon": CGSize(width: AppIconArt.canvas, height: AppIconArt.canvas),
+    ]
+
+    static func canvas(for view: String) -> CGSize { canvases[view] ?? canvas }
+
     static let views: [String: @MainActor () -> AnyView] = [
         "leads":        { AnyView(ABLeadsView(data: .ab, interactionDemo: false, staticRender: true)) },
         // interaction-demo variant: pressed hero card + hovered recent row +
@@ -59,6 +67,9 @@ enum PreviewRegistry {
             onToggleSearchFilters: { _ in })) },
         // Lead dossier at rest, then with the click-to-copy affordance forced:
         // Industry hovered (glyph + lifted surface), Email just copied.
+        // The app icon, rendered through the app's own tokens (see AppIconArt) so it
+        // cannot drift from the palette the UI uses.
+        "app-icon":     { AnyView(AppIconArt()) },
         "profile":      { AnyView(LeadProfileFixture.view()) },
         "profile-copy": { AnyView(LeadProfileFixture.view(
             demo: LeadProfileFixture.copyDemo)) },
@@ -96,7 +107,8 @@ enum PreviewHarness {
     /// for every registered view so the class fails loudly instead.
     static func placeholderPixels(in view: String) -> Int? {
         guard let builder = PreviewRegistry.views[view] else { return nil }
-        return placeholderPixels(rendering: AnyView(builder()))
+        return placeholderPixels(rendering: AnyView(builder()),
+                                 canvas: PreviewRegistry.canvas(for: view))
     }
 
     /// Positive control: a deliberately UNGATED `NSViewRepresentable` must score
@@ -105,18 +117,20 @@ enum PreviewHarness {
     /// view silently scores 0 and the guard is dead with the suite green.
     static func detectorControlPixels() -> Int? {
         placeholderPixels(rendering: AnyView(
-            UngatedAppKitProbe().frame(width: 120, height: 120)))
+            UngatedAppKitProbe().frame(width: 120, height: 120)),
+            canvas: PreviewRegistry.canvas)
     }
 
-    private static func placeholderPixels(rendering view: AnyView) -> Int? {
+    // `canvas` has NO default: a default-argument expression is evaluated
+    // nonisolated, so reading @MainActor state there is a Swift 6 error.
+    private static func placeholderPixels(rendering view: AnyView, canvas: CGSize) -> Int? {
         let content = view
-            .frame(width: PreviewRegistry.canvas.width, height: PreviewRegistry.canvas.height,
-                   alignment: .top)
+            .frame(width: canvas.width, height: canvas.height, alignment: .top)
             .environment(\.colorScheme, .dark)
             .environment(\.isStaticRender, true)
         let renderer = ImageRenderer(content: content)
         renderer.scale = 1
-        renderer.proposedSize = ProposedViewSize(PreviewRegistry.canvas)
+        renderer.proposedSize = ProposedViewSize(canvas)
         var cg: CGImage?
         if let ns = NSAppearance(named: .darkAqua) {
             ns.performAsCurrentDrawingAppearance { cg = renderer.cgImage }
@@ -202,8 +216,9 @@ enum PreviewHarness {
 
         // Pin appearance at BOTH layers (SwiftUI colorScheme + NSAppearance) and
         // give the view an explicit frame so it can't collapse to its ideal size.
+        let size = PreviewRegistry.canvas(for: view)
         let content = builder()
-            .frame(width: PreviewRegistry.canvas.width, height: PreviewRegistry.canvas.height,
+            .frame(width: size.width, height: size.height,
                    alignment: .top)   // top-align so tall content overflows only at the bottom
             .environment(\.colorScheme, dark ? .dark : .light)
             // Applies to EVERY registry entry — this is the one place that knows
@@ -214,7 +229,7 @@ enum PreviewHarness {
 
         let renderer = ImageRenderer(content: content)
         renderer.scale = scale
-        renderer.proposedSize = ProposedViewSize(PreviewRegistry.canvas)
+        renderer.proposedSize = ProposedViewSize(size)
 
         var cg: CGImage?
         if let ns {

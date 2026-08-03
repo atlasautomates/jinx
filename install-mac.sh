@@ -27,4 +27,11 @@ codesign -dvv /Applications/CECDashboard.app 2>&1 | grep -q "Authority=Developer
 # Acceptance: headless query must answer WITHOUT a Keychain prompt (grant survived).
 OUT="$(/Applications/CECDashboard.app/Contents/MacOS/CECDashboard --query count 2>&1 || true)"
 grep -q "leads" <<<"$OUT" || { echo "FAIL: headless --query broke (Keychain grant?): $OUT"; exit 1; }
+# The bundle id and version are identical across the swap, which is exactly when
+# Finder/Dock keep serving a cached icon representation — and the copy being
+# replaced has no icon keys at all, so without this the icon work looks unshipped.
+LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREG" -f /Applications/CECDashboard.app || true
+killall Dock 2>/dev/null || true
+
 echo "Installed + verified: $OUT"

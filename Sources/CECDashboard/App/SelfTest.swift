@@ -1848,6 +1848,12 @@ enum SelfTest {
         default:
             break
         }
+        // A canvases key that names no view falls back to the 1440×1000 tab canvas,
+        // so the icon would render non-square and only surface as an actool
+        // complaint far from the cause.
+        for key in PreviewRegistry.canvases.keys.sorted() where PreviewRegistry.views[key] == nil {
+            problems.append("preview: canvases key '\(key)' is not a registered view")
+        }
         for name in PreviewRegistry.views.keys.sorted() {
             guard let hits = PreviewHarness.placeholderPixels(in: name) else {
                 problems.append("preview: '\(name)' failed to render")

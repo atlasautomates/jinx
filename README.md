@@ -36,13 +36,21 @@ swift build
 ./.build/debug/CECDashboard --selftest         # pure seams + preview render checks
 ./.build/debug/CECDashboard --check-supabase   # live reads incl. lane/reply probes
 ./.build/debug/CECDashboard --screenshot list  # registered preview stills
+./xcode/icon/gen-icons.sh                      # regenerate the app icon
 ```
+
+The app icon is a VIEW (`Views/AppIconArt.swift`) rendered through the preview
+harness, not a drawing script — that keeps it on the same OKLCH tokens as the UI
+instead of a forked set of hex values. Re-run `gen-icons.sh` after changing it or
+any colour token it reads.
 
 ## What's here (M0)
 
-- `Theme/` — `DesignTokens.swift` (atlasautomates tokens → Swift: dark mode, pink
-  accent, SF Mono for data, 8px grid), `Components.swift` (Card, Badge, SectionLabel,
-  Sparkline).
+- `Theme/` — `ABTokens.swift` defines `enum DesignTokens`, the OKLCH channel tokens
+  the Leads tab and the app icon both read (teal identity hue 192, pink reply role
+  hue 350, near-black world). `DesignTokens.swift` defines the older `enum Palette`
+  (hex, pink accent) still used by the Campaigns/Pipeline widgets.
+  `Components.swift` (Card, Badge, SectionLabel, Sparkline).
 - `Models/` — the layout-spec + widget-data Codable contract (`claude -p`'s M2 target).
 - `Widgets/` — the four widget views (`kpi`, `chart`, `table`, `status-board`) + the
   `WidgetWrapper` registry that dispatches on type.
