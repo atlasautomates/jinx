@@ -309,43 +309,53 @@ enum SelfTest {
         if !empty.bySource.isEmpty || !empty.byStatus.isEmpty { problems.append("abmap: empty leads → empty breakdowns") }
         if empty.breakdownScopeNote != nil { problems.append("abmap: complete/empty data → no scope note") }
 
-        // WINDOWED snapshot, nothing filtered: keep the exact full-table figures the
-        // HEAD reads give us rather than downgrading them to the window, and disclose
-        // the window (2 fetched of 200).
+        // WINDOWED snapshot: ONE population, always. There is no "keep the exact
+        // full-table totals while nothing is filtered" path — it existed once, and
+        // because the snapshot fetch no longer issues per-stage HEAD reads it put a
+        // whole-table `scraped` in the header beside a window-scoped `scraped` in the
+        // hero, with a reply rate of 500%. Pins the mixed-population bug class:
+        // every headline figure must be counted over the SAME rows.
         let windowedInputs = DashboardInputs(
             leads: leads, totalCount: 200, leadsComplete: false,
-            statusCounts: ["campaigned": 80, "scraped": 120],
+            statusCounts: ["campaigned": 80, "scraped": 120],   // present and IGNORED
             repliedLeadIDs: ["a", "z"], messagedSends: sends)
         let windowed = ABLeadsData(inputs: windowedInputs, now: now)
-        if windowed.totals.scraped != 200 || windowed.totals.emailed != 80 || windowed.totals.replies != 2 {
-            problems.append("abmap: an unfiltered windowed load must keep the exact full-table figures "
-                + "(got \(windowed.totals.scraped)/\(windowed.totals.emailed)/\(windowed.totals.replies))")
+        if windowed.totals.scraped != 2 || windowed.totals.emailed != 1 || windowed.totals.replies != 1 {
+            problems.append("abmap: a windowed load must count the WINDOW, never mix in full-table "
+                + "figures (got \(windowed.totals.scraped)/\(windowed.totals.emailed)/\(windowed.totals.replies))")
         }
-        if windowed.emailedDenominator != 200 || abs(windowed.emailedOfScrapedPct - 40.0) > 0.001 {
-            problems.append("abmap: unfiltered windowed ratio must use the full-table denominator "
-                + "(got \(windowed.emailedOfScrapedPct)% / denom \(windowed.emailedDenominator ?? -1))")
+        if windowed.emailedDenominator != windowed.totals.scraped {
+            problems.append("abmap: the hero denominator and the header 'scraped' must be the SAME number "
+                + "(got \(windowed.emailedDenominator ?? -1) vs \(windowed.totals.scraped))")
         }
-        if windowed.breakdownScopeNote != "2 of 200" {
+        if windowed.breakdownScopeNote?.contains("2 of 200") != true {
             problems.append("abmap: a windowed snapshot must disclose its scope (got \(windowed.breakdownScopeNote ?? "nil"))")
         }
-        // Windowed AND the exact stage read failed → the denominator narrows to the
-        // window so the ratio stays leads/leads at ONE grain (1 of 2 = 50%).
-        let windowedNoStages = ABLeadsData(inputs: DashboardInputs(
-            leads: leads, totalCount: 200, leadsComplete: false), now: now)
-        if windowedNoStages.totals.emailed != 1 || windowedNoStages.emailedDenominator != 2
-            || abs(windowedNoStages.emailedOfScrapedPct - 50.0) > 0.001 {
-            problems.append("abmap: windowed fallback ratio must use the windowed denominator "
-                + "(got \(windowedNoStages.emailedOfScrapedPct)% / denom \(windowedNoStages.emailedDenominator ?? -1))")
-        }
-        // Windowed AND filtered: the window is all there is — count it, keep the note.
+        // Windowed AND filtered: same arithmetic, note retained.
         let windowedFiltered = ABLeadsData(inputs: windowedInputs,
                                            filter: LeadFilter(source: "sales-nav"), now: now)
         if windowedFiltered.totals.scraped != 1 || windowedFiltered.totals.emailed != 1 {
-            problems.append("abmap: a FILTERED windowed load must count the window, not report full-table totals "
+            problems.append("abmap: a FILTERED windowed load must count the matching window "
                 + "(got \(windowedFiltered.totals.scraped)/\(windowedFiltered.totals.emailed))")
         }
         if windowedFiltered.breakdownScopeNote == nil {
             problems.append("abmap: a filtered windowed load must still disclose the window")
+        }
+        // The reply rate cannot exceed 100%: replies are intersected with the
+        // CAMPAIGNED matching leads, so the numerator is a subset of the denominator
+        // even when a lead replied while still at an earlier stage (a data-integrity
+        // problem upstream that used to render as 200%).
+        let earlyReply = ABLeadsData(inputs: DashboardInputs(
+            leads: [LeadRow(id: "p", companyName: "P", firstName: nil, industry: nil,
+                            leadSource: nil, city: nil, state: nil,
+                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "campaigned"),
+                    LeadRow(id: "q", companyName: "Q", firstName: nil, industry: nil,
+                            leadSource: nil, city: nil, state: nil,
+                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "personalized")],
+            totalCount: 2, leadsComplete: true, repliedLeadIDs: ["p", "q"]), now: now)
+        if earlyReply.repliesOfEmailedPct > 100.0 {
+            problems.append("abmap: the reply rate must not exceed 100% — replies are counted over the "
+                + "leads that were actually emailed (got \(earlyReply.repliesOfEmailedPct)%)")
         }
 
         // percent() choke-point is total: negative/zero denominators never divide-by-zero.
@@ -425,8 +435,35 @@ enum SelfTest {
             problems.append("filter: the messaged trend must exclude sends to filtered-out leads "
                 + "(got \(florida.leadsMessagedWeekly.values.reduce(0, +)))")
         }
-        if florida.bySource.count != 1 || florida.byIndustry.count != 1 {
-            problems.append("filter: breakdown panels must count the filtered set only")
+        // EVERY panel counts the filtered set — asserted by TOTAL, not by row count.
+        // QA's mutation run proved the earlier `.count` checks were blind: swapping
+        // `byStatus`/`byRegion` to the unfiltered facets left the suite green, and
+        // those are precisely the panels this feature added. A sum can't be fooled
+        // by two categories collapsing to the same shape.
+        for (name, items, expected) in [
+            ("bySource", florida.bySource, 2), ("byIndustry", florida.byIndustry, 2),
+            ("byRegion", florida.byRegion, 2), ("byStatus", florida.byStatus, 2),
+        ] {
+            let total = items.reduce(0) { $0 + $1.count }
+            if total != expected {
+                problems.append("filter: \(name) must total the FILTERED set (got \(total), want \(expected))")
+            }
+        }
+        if florida.byRegion.first?.label != "Florida" {
+            problems.append("filter: byRegion must describe the filtered set (got \(florida.byRegion.map(\.label)))")
+        }
+        // The hero's `emailed` must be filtered too. The fixture is deliberately
+        // NON-degenerate for this: 2 of the 4 leads are campaigned and only ONE of
+        // those is in California, so an unfiltered `emailed` reads 2 where the
+        // filtered answer is 0 — the earlier fixture had every campaigned lead
+        // inside the filtered region, which made the assertion unfalsifiable.
+        let california = ABLeadsData(inputs: inputs, filter: LeadFilter(region: "California"), now: now)
+        if california.matchingCount != 1 || california.totals.emailed != 0 {
+            problems.append("filter: hero 'emailed' must count only MATCHING campaigned leads "
+                + "(got \(california.totals.emailed) over \(california.matchingCount) leads)")
+        }
+        if california.totals.replies != 0 {
+            problems.append("filter: replies must narrow with the filter (got \(california.totals.replies))")
         }
 
         // Lane classification: deep beats standard; no opener → none.
@@ -487,17 +524,32 @@ enum SelfTest {
 
         // Degraded lane reads: the dimension is dropped rather than answered wrongly
         // (empty id sets would classify every lead "Not personalized").
-        var degradedInputs = inputs
-        degradedInputs.deepLaneLeadIDs = []
-        degradedInputs.personalizedLeadIDs = []
-        degradedInputs.lanesDegraded = true
+        // Built through `compose`, not hand-assembled: a hand-built value encodes
+        // what I THINK the repository produces, and the flags that drive this
+        // behaviour (`partial`, `degradedReads`) are set there, not here.
+        let degradedInputs = LeadsRepository.compose(
+            leads: leads, totalCount: leads.count, leadsComplete: true,
+            deep: ([], ok: false), personalized: ([], ok: false),
+            replied: (inputs.repliedLeadIDs, ok: true),
+            messaged: (inputs.messagedSends, ok: true))
         let degraded = ABLeadsData(inputs: degradedInputs, filter: LeadFilter(lane: .deep), now: now)
         if degraded.laneFilterAvailable {
             problems.append("filter: a failed lane read must disable the lane menu")
         }
-        if degraded.filter.lane != nil || degraded.matchingCount != 4 {
+        if degraded.effectiveFilter.lane != nil || degraded.matchingCount != 4 {
             problems.append("filter: a lane filter over degraded lane data must be dropped, not applied "
                 + "(got \(degraded.matchingCount) leads)")
+        }
+        // …but the user's REQUESTED filter is preserved: the bar edits `filter`, so a
+        // suppressed dimension is restored when the read recovers instead of being
+        // silently written away on the next menu pick.
+        if degraded.filter.lane != .deep {
+            problems.append("filter: suppressing a dimension must not discard the user's selection")
+        }
+        // A degraded load names what is understated rather than showing a confident
+        // zero — the flag alone rendered nowhere.
+        if !degradedInputs.partial || degraded.degradedReads.isEmpty {
+            problems.append("filter: a degraded load must carry named reads for the UI to surface")
         }
 
         // The list is capped, and says so through matchingCount ≠ rendered rows.
@@ -510,6 +562,68 @@ enum SelfTest {
         if capped.recentLeads.count != ABLeadsData.listCap || capped.matchingCount != many.count {
             problems.append("filter: the list must cap at listCap while reporting the true match count "
                 + "(rendered \(capped.recentLeads.count), matching \(capped.matchingCount))")
+        }
+
+        // The "Other" fold: the tail branch runs on every real render (the live book
+        // derives ~76 regions against a topN of 6) and had no coverage at all —
+        // deleting the fold entirely left the suite green while the panel silently
+        // stopped totalling the set.
+        let manyCategories = (0..<12).map { i in
+            lead("o\(i)", source: "src-\(i)", industry: "ind-\(i)", state: "FL",
+                 stage: "scraped", created: "2026-07-20T12:00:00+00:00")
+        }
+        let folded = ABLeadsData(inputs: DashboardInputs(
+            leads: manyCategories, totalCount: 12, leadsComplete: true), now: now)
+        if folded.bySource.reduce(0, { $0 + $1.count }) != 12 {
+            problems.append("filter: a breakdown with more categories than topN must fold the tail "
+                + "into 'Other', still totalling the set (got \(folded.bySource.reduce(0) { $0 + $1.count }))")
+        }
+        if folded.bySource.last?.label != "Other" {
+            problems.append("filter: the folded tail must be labelled 'Other' (got \(folded.bySource.map(\.label)))")
+        }
+        // …and the MENU must not truncate at all, or a facet becomes unreachable
+        // (the live region menu was dropping roughly half its options silently).
+        if folded.facets.sources.count != 12 {
+            problems.append("filter: facet menus must offer every value, not a top-N slice "
+                + "(got \(folded.facets.sources.count) of 12)")
+        }
+        // A selection emptied by another dimension still appears in its own menu —
+        // otherwise it can be cleared but never re-picked.
+        let stranded = ABLeadsData(inputs: inputs,
+                                   filter: LeadFilter(region: "Florida", source: "sales-nav"), now: now)
+        if !stranded.facets.sources.contains(where: { $0.value == "sales-nav" }) {
+            problems.append("filter: an active selection must remain in its own menu even at count 0")
+        }
+
+        // Row labels and facet labels are the SAME string: the row used to render a
+        // null column as "—" while the panel and the menu called it "Unknown", so
+        // picking "Unknown" showed rows labelled something else.
+        let nullish = ABLeadsData(inputs: DashboardInputs(
+            leads: [LeadRow(id: "n", companyName: "N", firstName: nil, industry: nil,
+                            leadSource: nil, city: nil, state: nil,
+                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "scraped")],
+            totalCount: 1, leadsComplete: true), filter: LeadFilter(source: LeadFacets.unknown), now: now)
+        if nullish.matchingCount != 1 || nullish.recentLeads.first?.source != LeadFacets.unknown
+            || nullish.recentLeads.first?.industry != LeadFacets.unknown {
+            problems.append("filter: a null column must render in the row with the SAME label the "
+                + "menu and panel use (got source '\(nullish.recentLeads.first?.source ?? "nil")')")
+        }
+
+        // Messaged-trend total counts LEADS, not lead-weeks: one lead messaged in
+        // three different weeks is one lead reached.
+        let repeatSends = ABLeadsData(inputs: DashboardInputs(
+            leads: [lead("r", source: "gmaps-leads", industry: "Solar", state: "FL",
+                         stage: "campaigned", created: "2026-07-06T12:00:00+00:00")],
+            totalCount: 1, leadsComplete: true,
+            messagedSends: [.init(leadID: "r", sentAt: "2026-07-08T09:00:00+00:00"),
+                            .init(leadID: "r", sentAt: "2026-07-15T09:00:00+00:00"),
+                            .init(leadID: "r", sentAt: "2026-07-22T09:00:00+00:00")]), now: now)
+        if repeatSends.leadsMessagedWeekly.values.reduce(0, +) != 3 {
+            problems.append("filter: the weekly series counts distinct leads PER WEEK (expected 3 lead-weeks)")
+        }
+        if repeatSends.leadsMessagedTotal != 1 {
+            problems.append("filter: the messaged total must count DISTINCT leads over the window, not "
+                + "sum the weekly buckets (got \(repeatSends.leadsMessagedTotal))")
         }
 
         // LeadFilter's own contract.
@@ -553,6 +667,17 @@ enum SelfTest {
         // "DE" is Delaware in one book and Germany in the other.
         check("ambiguous abbrev", location: "Berlin, DE", "DE")
         check("abbrev with US marker", location: "Miami, FL, United States", "Florida")
+        // …and the COUNTRY COLUMN is a US marker too. source-jobsignal writes
+        // location "San Francisco, CA" + country "US" with no state; ignoring the
+        // column split three live leads into a bucket named "CA" sitting beside
+        // "California".
+        check("abbrev + country column", location: "San Francisco, CA", country: "US", "California")
+        check("abbrev, no corroboration", location: "San Francisco, CA", "CA")
+        // Georgia is both a US state and a country: matching the name without US
+        // corroboration would merge Tbilisi into Atlanta's bucket.
+        check("georgia the country", location: "Tbilisi, Georgia", "Georgia (country)")
+        check("georgia the state", location: "Atlanta, Georgia, United States", "Georgia")
+        check("georgia via country column", location: "Atlanta, Georgia", country: "USA", "Georgia")
         // Fallbacks.
         check("country column", country: "USA", "United States")
         check("country column literal", country: "Canada", "Canada")
@@ -573,8 +698,8 @@ enum SelfTest {
 
         if term("Acme Solar") != "Acme Solar" { problems.append("search: a plain term must pass through unchanged") }
         if term("  Acme   Solar  ") != "Acme Solar" { problems.append("search: whitespace must collapse") }
-        if term("O'Brien & Sons-Ltd.") != "O'Brien & Sons-Ltd." {
-            problems.append("search: punctuation that is safe in a value must survive (got \(term("O'Brien & Sons-Ltd.") ?? "nil"))")
+        if term("O'Brien Sons-Ltd.") != "O'Brien Sons-Ltd." {
+            problems.append("search: punctuation that is safe in a value must survive (got \(term("O'Brien Sons-Ltd.") ?? "nil"))")
         }
         // Injection: a comma would start a NEW predicate inside or=(…).
         if term("acme,email.ilike.*@*") != "acme email.ilike. @" {
@@ -598,8 +723,30 @@ enum SelfTest {
             problems.append("search: newlines/tabs must collapse to spaces, not vanish")
         }
         // `_` is LIKE's single-char wildcard: kept (it can only widen a match, and
-        // stripping it breaks a literal search for a name containing one).
+        // stripping it breaks a literal search for a name containing one) — but a
+        // term made ONLY of wildcards is not a search.
         if term("acme_corp") != "acme_corp" { problems.append("search: '_' must be preserved") }
+        if term("__") != nil || term("____") != nil {
+            problems.append("search: an all-wildcard term must not run a query (it matches everything)")
+        }
+        // `&` and `=` are dropped rather than trusted to `URLComponents`' encoding,
+        // so the injection guarantee survives a change of HTTP layer; `+` is dropped
+        // because PostgREST decodes it as a space, which turned "AT+T" into a search
+        // for "AT T" and answered "no lead matches" — a false negative, in the one
+        // feature that must never produce one.
+        for (raw, why) in [("acme&or=(id.eq.1", "&"), ("acme=x", "="), ("AT+T", "+")] {
+            if let cleaned = term(raw), cleaned.contains(where: { "&=+".contains($0) }) {
+                problems.append("search: '\(why)' must not survive sanitisation (got \(cleaned))")
+            }
+        }
+        // The output feeds `ilike.*TERM*`: if a wildcard ever survives, BOTH the
+        // injection guard and the ReDoS guard are reopened at once. Pin the property,
+        // not the individual characters.
+        for hostile in ["a%b", "a*b", "%%%", "a\\%b", "50% off", "5*5"] {
+            if let cleaned = term(hostile), cleaned.contains(where: { $0 == "%" || $0 == "*" }) {
+                problems.append("search: sanitised output must never contain a LIKE wildcard (got \(cleaned))")
+            }
+        }
 
         // The built filter covers company AND person name, and stays one group.
         let filter = LeadsRepository.searchFilter("Acme")
@@ -703,13 +850,66 @@ enum SelfTest {
             problems.append("leads-ids: garbage body must be nil (failed read), not empty")
         }
         let idPage = LeadsRepository.leadIDs(
-            Data(#"[{"lead_id":"a"},{"lead_id":"a"},{"lead_id":" "},{"lead_id":null}]"#.utf8))
+            Data(#"[{"id":"1","lead_id":"a"},{"id":"2","lead_id":"a"},{"id":"3","lead_id":" "},{"id":"4","lead_id":null}]"#.utf8))
         if idPage?.ids != ["a"] || idPage?.rows != 4 {
             problems.append("leads-ids: expected {a}/4 rows (rows counts EVERY row so paging "
                 + "advances), got \(String(describing: idPage))")
         }
+        // The keyset cursor is the LAST ROW's own id — including when that row's
+        // lead_id is null. Advancing by anything else re-requests the same page
+        // forever, or (with offset) skips rows whenever lead_id isn't unique, which
+        // is exactly the shape of the `replies` table.
+        if idPage?.cursor != "4" {
+            problems.append("leads-ids: cursor must be the last row's id even when its lead_id is "
+                + "null (got \(idPage?.cursor ?? "nil"))")
+        }
         if LeadsRepository.leadIDs(Data("[]".utf8))?.rows != 0 {
             problems.append("leads-ids: [] must parse as an EMPTY page, not a failure")
+        }
+        if LeadsRepository.leadIDs(Data("[]".utf8))?.cursor != nil {
+            problems.append("leads-ids: an empty page must not produce a cursor")
+        }
+
+        // Display ordering is applied AFTER the keyset walk (which is ordered by id,
+        // not by date): newest first, undated rows last, ties broken by id so the
+        // order is total — a list titled by recency must not lead with rows that
+        // have no date at all.
+        let ordered = LeadsRepository.newestFirst([
+            LeadRow(id: "b", companyName: nil, firstName: nil, industry: nil, leadSource: nil,
+                    city: nil, state: nil, createdAt: "2026-07-01T00:00:00+00:00"),
+            LeadRow(id: "undated", companyName: nil, firstName: nil, industry: nil, leadSource: nil,
+                    city: nil, state: nil, createdAt: nil),
+            LeadRow(id: "c", companyName: nil, firstName: nil, industry: nil, leadSource: nil,
+                    city: nil, state: nil, createdAt: "2026-07-20T00:00:00+00:00"),
+            LeadRow(id: "a", companyName: nil, firstName: nil, industry: nil, leadSource: nil,
+                    city: nil, state: nil, createdAt: "2026-07-20T00:00:00+00:00"),
+        ])
+        if ordered.map(\.id) != ["c", "a", "b", "undated"] {
+            problems.append("leads-order: newest first, ties by id desc, undated last "
+                + "(got \(ordered.map(\.id)))")
+        }
+
+        // Completeness is judged on DISTINCT ids. A walk that re-read rows would
+        // otherwise satisfy `rows >= total` BY the duplication — the snapshot would
+        // claim to be the whole book precisely when it had dropped rows.
+        let dupRow = LeadRow(id: "dup", companyName: nil, firstName: nil, industry: nil,
+                             leadSource: nil, city: nil, state: nil, createdAt: nil)
+        let duplicated = LeadsRepository.compose(
+            leads: [dupRow, dupRow, dupRow], totalCount: 3, leadsComplete: true)
+        if duplicated.leadsComplete {
+            problems.append("leads-compose: duplicated rows must NOT satisfy the completeness test")
+        }
+
+        // A failed send_queue read must degrade, not render as a book nobody emailed.
+        let sendsFailed = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
+            messaged: ([], ok: false))
+        if !sendsFailed.partial || !sendsFailed.degradedReads.contains("outreach history") {
+            problems.append("leads-compose: a failed send_queue read must mark partial and name itself "
+                + "(got \(sendsFailed.degradedReads))")
+        }
+        if sendsFailed.lanesDegraded {
+            problems.append("leads-compose: a failed send_queue read must not disable the lane menu")
         }
 
         // tally (the paged read's pure page parser): an unparseable 2xx body must

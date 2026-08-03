@@ -19,7 +19,11 @@ struct LeadFilter: Equatable, Sendable {
             switch self {
             case .deep:     return "Deep lane"
             case .standard: return "Standard personalization"
-            case .none:     return "Not personalized"
+            // NOT "Not personalized": deep-lane leads keep their lane even when
+            // their copy hasn't been written, so this bucket is standard-lane leads
+            // with no opener — it does not list every lead lacking copy, and the
+            // label must not promise that it does.
+            case .none:     return "No opener yet"
             }
         }
     }
@@ -40,6 +44,13 @@ struct LeadFilter: Equatable, Sendable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// The same lens without its lane dimension — used when the lane reads failed,
+    /// so the derivation can suppress a dimension it cannot compute WITHOUT the
+    /// user's selection being rewritten (the bar keeps editing `filter`).
+    func droppingLane() -> LeadFilter {
+        LeadFilter(lane: nil, region: region, source: source, industry: industry)
+    }
+
     /// Does one lead's derived facets pass every active dimension?
     /// Facet derivation lives in `LeadFacets` so the filter and the facet menus
     /// can never disagree about what a lead's region/source/industry IS.
@@ -52,26 +63,65 @@ struct LeadFilter: Equatable, Sendable {
     }
 }
 
-/// One lead reduced to the four filterable dimensions. Derived ONCE per lead per
-/// snapshot (in `LeadsSnapshot.facets`), then reused by the filter test, the
-/// facet menus and the breakdown panels — one derivation, no drift.
+/// One lead reduced to the four filterable dimensions, plus the parsed timestamp
+/// the trends bucket on. Derived ONCE per lead per snapshot (in
+/// `LeadSnapshot.facets`) and reused by the filter test, the facet menus, the
+/// breakdown panels AND the rendered row — one derivation, no drift.
+///
+/// The single-derivation rule is not tidiness. Two things depended on it: the row
+/// used to label a null source "—" while the panel and the menu called the same
+/// lead "Unknown" (two spellings of one value), and re-deriving per filter change
+/// cost 46 ms at 1.5k leads and 414 ms at this repository's own 25k ceiling —
+/// on the main actor, per menu pick.
 struct LeadFacets: Equatable, Sendable {
     let lane: LeadFilter.Lane
     let region: String
     let source: String
     let industry: String
+    /// Display label for the row's location column (not a filter dimension).
+    let location: String
+    /// `created_at`, parsed once. `ISO8601DateFormatter` costs ~60 µs a call and
+    /// dominated the old per-derive cost.
+    let createdAt: Date?
 
-    /// Placeholder shown (and filterable) when a lead's column is null/blank.
+    /// Placeholder shown (and filterable) when a lead's column is null/blank. The
+    /// row renders this same string, so clicking a menu option can never show rows
+    /// labelled with a different word than the option that selected them.
     static let unknown = "Unknown"
 
     init(lead: LeadRow, deepLane: Bool, personalized: Bool) {
-        // Deep wins over standard: a deep-lane lead also has an opener, and the
-        // question the lane filter answers is "which lane produced this copy?".
+        // Deep is a PROVENANCE, not a state: a deep-cohort lead stays in the deep
+        // lane even before its copy is written (9 of the 16 live deep leads have no
+        // opener yet). The third bucket is therefore named for what it actually
+        // tests — no opener, standard lane — rather than "not personalized", which
+        // would read as a promise to list every lead lacking copy.
         self.lane = deepLane ? .deep : (personalized ? .standard : LeadFilter.Lane.none)
         self.region = RegionKey.region(city: lead.city, state: lead.state,
                                        location: lead.location, country: lead.country)
         self.source = lead.leadSource?.nilIfEmpty ?? Self.unknown
         self.industry = lead.industry?.nilIfEmpty ?? Self.unknown
+        self.location = ABLeadsData.locationLabel(city: lead.city, state: lead.state,
+                                                  location: lead.location)
+        self.createdAt = DateParse.iso(lead.createdAt)
+    }
+}
+
+/// A lead book plus everything derived from it that does NOT depend on the filter.
+/// Built once per fetch; a filter change re-runs only the `matches` test and the
+/// tallies over these values.
+struct LeadSnapshot: Sendable {
+    let inputs: DashboardInputs
+    /// Parallel to `inputs.leads` — index i describes lead i. Built together in
+    /// `init`, so the two can't drift apart.
+    let facets: [LeadFacets]
+
+    init(_ inputs: DashboardInputs) {
+        self.inputs = inputs
+        self.facets = inputs.leads.map {
+            LeadFacets(lead: $0,
+                       deepLane: inputs.deepLaneLeadIDs.contains($0.id),
+                       personalized: inputs.personalizedLeadIDs.contains($0.id))
+        }
     }
 }
 
@@ -95,7 +145,13 @@ struct FilterFacets: Sendable {
     /// usual faceted-search rule), so a menu never offers a choice that would
     /// return zero rows, and the count beside each option is the number of leads
     /// selecting it would actually show.
-    static func build(_ facets: [LeadFacets], filter: LeadFilter, topN: Int = 40) -> FilterFacets {
+    ///
+    /// NOT truncated. An earlier cut kept the top 40 by count and dropped the tail
+    /// silently — the live book derives ~84 region labels, so roughly half the
+    /// region menu was unreachable and unnamed, and an absent facet reads as an
+    /// absent population. A macOS menu scrolls; a missing bucket doesn't announce
+    /// itself.
+    static func build(_ facets: [LeadFacets], filter: LeadFilter) -> FilterFacets {
         func tally<T: Hashable>(_ dimension: KeyPath<LeadFacets, T>,
                                 ignoring clear: (inout LeadFilter) -> Void) -> [T: Int] {
             var others = filter
@@ -105,20 +161,26 @@ struct FilterFacets: Sendable {
             return counts
         }
 
-        func options(_ counts: [String: Int]) -> [Option] {
-            counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-                .prefix(topN)
+        func options(_ counts: [String: Int], selected: String?) -> [Option] {
+            var out = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
                 .map { Option(value: $0.key, count: $0.value) }
+            // The active value always appears in its own menu, even at count 0 —
+            // otherwise a selection that another dimension emptied can be cleared
+            // but never re-picked.
+            if let selected, !out.contains(where: { $0.value == selected }) {
+                out.append(Option(value: selected, count: 0))
+            }
+            return out
         }
 
         var out = FilterFacets()
         let laneCounts = tally(\.lane) { $0.lane = nil }
         out.lanes = LeadFilter.Lane.allCases.compactMap { lane in
-            laneCounts[lane].map { (lane, $0) }
+            laneCounts[lane].map { (lane, $0) } ?? (lane == filter.lane ? (lane, 0) : nil)
         }
-        out.regions = options(tally(\.region) { $0.region = nil })
-        out.sources = options(tally(\.source) { $0.source = nil })
-        out.industries = options(tally(\.industry) { $0.industry = nil })
+        out.regions = options(tally(\.region) { $0.region = nil }, selected: filter.region)
+        out.sources = options(tally(\.source) { $0.source = nil }, selected: filter.source)
+        out.industries = options(tally(\.industry) { $0.industry = nil }, selected: filter.industry)
         return out
     }
 }

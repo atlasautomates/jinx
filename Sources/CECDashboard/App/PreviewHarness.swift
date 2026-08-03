@@ -29,6 +29,19 @@ enum PreviewRegistry {
             data: .ab, staticRender: true,
             searchQuery: .constant("harbor"),
             searchState: .results(term: "harbor", hits: Array(ABLeadsData.ab.recentLeads.prefix(3))))) },
+        // The three states nobody looks at unless they are registered: a search that
+        // found nothing, one that FAILED (must not read as "no such lead"), and a
+        // degraded load naming which figures are understated.
+        "leads-search-empty": { AnyView(ABLeadsView(
+            data: .ab, staticRender: true,
+            searchQuery: .constant("zzzz"),
+            searchState: .results(term: "zzzz", hits: []))) },
+        "leads-search-failed": { AnyView(ABLeadsView(
+            data: .ab, staticRender: true,
+            searchQuery: .constant("harbor"),
+            searchState: .failed(term: "harbor",
+                                 message: "Network error: The request timed out."))) },
+        "leads-degraded": { AnyView(ABLeadsView(data: .abDegraded, staticRender: true)) },
         // Lead dossier at rest, then with the click-to-copy affordance forced:
         // Industry hovered (glyph + lifted surface), Email just copied.
         "profile":      { AnyView(LeadProfileFixture.view()) },

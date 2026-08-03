@@ -98,6 +98,14 @@ struct SupabaseClient {
             return data
         } catch let error as ClientError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            // Cancellation is not a transport failure. Erasing it into one made a
+            // closed window write "Network error: cancelled" into a stale banner,
+            // and made a cancelled paged walk report itself as a DEGRADED read —
+            // which then hid the Lane menu on the way out.
+            throw CancellationError()
         } catch {
             throw ClientError.transport(error.localizedDescription)
         }
@@ -120,6 +128,14 @@ struct SupabaseClient {
             return n
         } catch let error as ClientError {
             throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            // Cancellation is not a transport failure. Erasing it into one made a
+            // closed window write "Network error: cancelled" into a stale banner,
+            // and made a cancelled paged walk report itself as a DEGRADED read —
+            // which then hid the Lane menu on the way out.
+            throw CancellationError()
         } catch {
             throw ClientError.transport(error.localizedDescription)
         }

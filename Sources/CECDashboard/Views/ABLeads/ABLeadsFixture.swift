@@ -41,19 +41,28 @@ struct ABLeadsData: Sendable {
 
     /// Where each lead sits geographically (derived — see `RegionKey`).
     var byRegion: [Breakdown] = []
-    /// The lens currently applied. Every figure above is computed from the leads
-    /// that pass it — there is no path that mixes a filtered list with unfiltered
-    /// headline stats.
+    /// DISTINCT leads messaged across the whole trend window (the per-week series
+    /// sums to lead-WEEKS, which overstates leads reached).
+    var leadsMessagedTotal: Int = 0
+    /// The lens the USER asked for. The filter bar edits this, so a dimension the
+    /// derivation had to suppress this pass (see `effectiveFilter`) is never
+    /// silently discarded from their selection.
     var filter: LeadFilter = .all
+    /// The lens actually applied. Differs from `filter` only when a dimension
+    /// couldn't be computed — today, the lane, when its reads failed.
+    var effectiveFilter: LeadFilter = .all
     /// Menu contents for the filter bar, counted over the current lead set.
     var facets: FilterFacets = FilterFacets()
-    /// False when the lane reads failed — the lane menu hides rather than claim
-    /// every lead is "Not personalized".
+    /// False when the lane reads failed — the lane menu disables itself rather than
+    /// claim every lead has no opener.
     var laneFilterAvailable: Bool = true
     /// Leads passing the filter (the list is capped; this is the honest total).
     var matchingCount: Int = 0
     /// True when a supplementary read degraded this load.
     var partial: Bool = false
+    /// Which reads degraded, named, so the UI can say what is understated rather
+    /// than rendering a confident zero. Empty when the load was clean.
+    var degradedReads: [String] = []
 
     /// Rows the recent-leads list renders at most. The list is lazy, but every row
     /// is an interactive, hoverable view — past a few hundred the scroll cost is
@@ -127,6 +136,9 @@ struct ABLeadsData: Sendable {
             .init(label: "United Kingdom", count: 96),
             .init(label: "Unknown", count: 105),
         ],
+        // Distinct leads over the window — deliberately BELOW the 566 lead-weeks the
+        // weekly buckets sum to, so the still shows the two are different numbers.
+        leadsMessagedTotal: 402,
         facets: FilterFacets(
             lanes: [(.deep, 96), (.standard, 765), (LeadFilter.Lane.none, 379)],
             regions: [.init(value: "Florida", count: 341), .init(value: "California", count: 296),
@@ -139,6 +151,15 @@ struct ABLeadsData: Sendable {
                          .init(value: "Credit Unions", count: 174), .init(value: "Web Agencies", count: 152)]),
         matchingCount: 1240
     )
+
+    /// Frozen "degraded load" variant: the replies and outreach reads failed, so
+    /// their figures are understated rather than zero — and the tab has to say so.
+    static let abDegraded: ABLeadsData = {
+        var d = ab
+        d.partial = true
+        d.degradedReads = ["replies", "outreach history"]
+        return d
+    }()
 
     /// Frozen "filter applied" variant for the preview harness — the same fixture
     /// narrowed to one lane + one region, so a still can show the filter bar in its
@@ -197,14 +218,18 @@ extension ABLeadsData {
     /// - EVERY figure is computed from the leads passing `filter`. There is no
     ///   path that pairs a filtered list with unfiltered headline stats — that was
     ///   the whole point of the filter bar, and a mixed view is a lie the user
-    ///   cannot see.
-    /// - `scraped`  = leads matching the filter. Exact while the snapshot is the
-    ///   whole table (`leadsComplete`); otherwise the unfiltered view keeps using
-    ///   the exact full-table figures and the filtered view discloses "N of M".
+    ///   cannot see. There is deliberately NO "keep the exact full-table totals
+    ///   when nothing is filtered" shortcut: an earlier cut had one, and because
+    ///   the snapshot fetch stopped issuing the exact per-stage HEAD reads, it put
+    ///   a whole-table `scraped` in the header beside a window-scoped `scraped` in
+    ///   the hero, and a reply rate of 500%. One population, always.
+    /// - `scraped`  = leads matching the filter.
     /// - `emailed`  = matching leads at the `campaigned` enrichment stage (added to
     ///   an outbound campaign).
-    /// - `replies`  = matching leads that appear in `replies` — the same lead grain
-    ///   as `emailed`, so the reply rate can't exceed 100% on multi-reply threads.
+    /// - `replies`  = matching leads that BOTH replied and reached `campaigned`, so
+    ///   the numerator is a subset of the denominator and the rate cannot exceed
+    ///   100% (a lead that replied while still at `personalized` — a data-integrity
+    ///   problem upstream — must not render as 500%).
     /// - weekly series share ONE 12-week window anchored to `now` (aligned axes):
     ///   added counts distinct matching leads by `created_at`; messaged counts
     ///   DISTINCT matching leads per week by `send_queue.sent_at`. Both fail-open to
@@ -212,92 +237,88 @@ extension ABLeadsData {
     /// - breakdowns + facet menus count over the same matching set.
     ///
     /// `now` is injectable for deterministic tests; production passes the wall clock.
-    init(inputs: DashboardInputs, filter: LeadFilter = .all, now: Date = Date()) {
-        let facets = inputs.leads.map {
-            LeadFacets(lead: $0,
-                       deepLane: inputs.deepLaneLeadIDs.contains($0.id),
-                       personalized: inputs.personalizedLeadIDs.contains($0.id))
-        }
+    init(snapshot: LeadSnapshot, filter: LeadFilter = .all, now: Date = Date()) {
+        let inputs = snapshot.inputs
+        let facets = snapshot.facets
         // A lane filter over degraded lane reads would silently answer "everything
-        // is unpersonalized". Drop that dimension rather than answer wrongly.
-        let effective = inputs.lanesDegraded ? LeadFilter(lane: nil, region: filter.region,
-                                                          source: filter.source,
-                                                          industry: filter.industry) : filter
+        // is unpersonalized". Drop that dimension rather than answer wrongly — but
+        // record the REQUESTED filter, so the bar keeps editing what the user asked
+        // for and a transient read failure can't silently discard their selection.
+        let effective = inputs.lanesDegraded ? filter.droppingLane() : filter
         let matchingIndices = facets.indices.filter { effective.matches(facets[$0]) }
         let matching = matchingIndices.map { inputs.leads[$0] }
         let matchingFacets = matchingIndices.map { facets[$0] }
         let matchingIDs = Set(matching.map(\.id))
 
-        // Which arithmetic the headline figures use:
-        // - complete snapshot → count the matching rows (exact, and it moves with
-        //   the filter);
-        // - windowed snapshot, nothing filtered → keep the exact full-table figures
-        //   the HEAD reads give us, rather than downgrading a working number;
-        // - windowed snapshot + a filter → the window is all we have; count it and
-        //   say so ("N of M").
-        let windowed = !inputs.leadsComplete
-        let useGlobals = windowed && !effective.isActive
+        let emailedIDs = Set(matching.filter { ABLeadsData.isCampaigned($0) }.map(\.id))
+        let scraped = matching.count
+        let emailed = emailedIDs.count
+        let replies = inputs.repliedLeadIDs.intersection(emailedIDs).count
 
-        let scraped = useGlobals ? inputs.totalCount : matching.count
-        let emailed = useGlobals
-            ? (inputs.statusCounts["campaigned"] ?? ABLeadsData.campaignedCount(matching))
-            : ABLeadsData.campaignedCount(matching)
-        let replies = useGlobals
-            ? inputs.repliedLeadIDs.count
-            : inputs.repliedLeadIDs.intersection(matchingIDs).count
-        // Denominator matches the numerator's grain: full table when both are
-        // full-table figures, the matching set otherwise.
-        let ratioDenominator = useGlobals
-            ? (inputs.statusCounts.isEmpty ? inputs.leads.count : inputs.totalCount)
-            : matching.count
-
-        self.filter = effective
+        self.filter = filter
+        self.effectiveFilter = effective
         self.laneFilterAvailable = !inputs.lanesDegraded
         self.partial = inputs.partial
+        self.degradedReads = inputs.degradedReads
         self.matchingCount = matching.count
         self.totals = Totals(scraped: scraped, emailed: emailed, replies: replies)
-        self.emailedDenominator = ratioDenominator
-        self.emailedOfScrapedPct = ABLeadsData.percent(emailed, of: ratioDenominator)
+        self.emailedDenominator = scraped
+        self.emailedOfScrapedPct = ABLeadsData.percent(emailed, of: scraped)
         self.repliesOfEmailedPct = ABLeadsData.percent(replies, of: emailed)
 
         self.leadsAddedWeekly = ABLeadsData.weeklySeries(
-            timestamps: matching.compactMap { $0.createdAt }, weeks: 12, now: now)
-        // Sends belonging to leads outside the current lens are not this view's
-        // trend — except in the globals case, where the snapshot is a window and
-        // intersecting it would under-count sends to leads we simply didn't fetch.
-        let sends = useGlobals ? inputs.messagedSends
-                               : inputs.messagedSends.filter { matchingIDs.contains($0.leadID) }
+            dates: matchingFacets.compactMap { $0.createdAt }, weeks: 12, now: now)
+        // Sends belonging to leads outside the current lens are not this view's trend.
+        let sends = inputs.messagedSends.filter { matchingIDs.contains($0.leadID) }
         self.leadsMessagedWeekly = ABLeadsData.weeklySeries(events: sends, weeks: 12, now: now)
+        // DISTINCT leads over the whole window — the per-week series sums to
+        // lead-WEEKS, so a lead messaged in three different weeks would otherwise
+        // read as three leads under a chart titled "Leads messaged".
+        self.leadsMessagedTotal = ABLeadsData.distinctLeads(sends, weeks: 12, now: now)
 
         self.bySource = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.source }
         self.byIndustry = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.industry }
         self.byRegion = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.region }
         self.byStatus = ABLeadsData.statusBreakdown(matching)
         self.facets = FilterFacets.build(facets, filter: effective)
-        // Disclose whenever the numbers come from a window rather than the book.
-        self.breakdownScopeNote = windowed
-            ? "\(inputs.leads.count) of \(inputs.totalCount)" : nil
+        // Disclose whenever the snapshot itself is a window rather than the book.
+        // Phrased as a caveat about the SOURCE, not as a count of what's displayed:
+        // with a filter active the figures cover the matching subset, not these rows.
+        self.breakdownScopeNote = inputs.leadsComplete
+            ? nil : "partial snapshot · \(inputs.leads.count) of \(inputs.totalCount) rows"
 
-        self.recentLeads = matching.prefix(ABLeadsData.listCap).map(ABLeadsData.lead)
+        self.recentLeads = zip(matching, matchingFacets)
+            .prefix(ABLeadsData.listCap).map { ABLeadsData.lead($0, facets: $1) }
     }
 
-    /// One DB row → one list row. Shared by the tab's list and the search results,
-    /// so a hit renders exactly like the lead it is.
-    static func lead(_ row: LeadRow) -> Lead {
-        Lead(leadID: row.id,
-             company: row.companyName?.nilIfEmpty ?? "Unknown",
-             industry: row.industry?.nilIfEmpty ?? "—",
-             location: locationLabel(city: row.city, state: row.state, location: row.location),
-             source: row.leadSource?.nilIfEmpty ?? "—",
-             status: stageLabel(row.enrichmentStage),
-             added: dayLabel(row.createdAt),
-             firstName: row.firstName?.nilIfEmpty)
+    /// Convenience for call sites holding raw inputs (selftest, voice paths).
+    init(inputs: DashboardInputs, filter: LeadFilter = .all, now: Date = Date()) {
+        self.init(snapshot: LeadSnapshot(inputs), filter: filter, now: now)
     }
 
-    /// Leads that reached the outreach stage. One spelling of the comparison, used
-    /// by both the exact and windowed paths.
+    /// One DB row → one list row, using the facets already derived for it so the
+    /// row, the breakdown panel and the filter menu spell a null column the SAME
+    /// way (they used to disagree: "—" in the row, "Unknown" in the panel).
+    static func lead(_ row: LeadRow, facets: LeadFacets? = nil) -> Lead {
+        let f = facets ?? LeadFacets(lead: row, deepLane: false, personalized: false)
+        return Lead(leadID: row.id,
+                    company: row.companyName?.nilIfEmpty ?? "Unknown",
+                    industry: f.industry,
+                    location: f.location,
+                    source: f.source,
+                    status: stageLabel(row.enrichmentStage),
+                    added: dayLabel(row.createdAt),
+                    firstName: row.firstName?.nilIfEmpty)
+    }
+
+    /// Did this lead reach the outreach stage? One spelling of the comparison.
+    static func isCampaigned(_ lead: LeadRow) -> Bool {
+        (lead.enrichmentStage ?? "").lowercased() == "campaigned"
+    }
+
+    /// Leads that reached the outreach stage.
     static func campaignedCount(_ leads: [LeadRow]) -> Int {
-        leads.filter { ($0.enrichmentStage ?? "").lowercased() == "campaigned" }.count
+        leads.filter(isCampaigned).count
     }
 
     /// `n/d` as a percentage, guarded: a zero (or negative) denominator yields 0,
@@ -376,8 +397,31 @@ extension ABLeadsData {
     /// Distinct leads (each `created_at` is one lead) bucketed into a `weeks`-long
     /// window anchored to `now`.
     static func weeklySeries(timestamps: [String], weeks: Int, now: Date = Date()) -> Series {
-        weekBuckets(timestamps.compactMap { DateParse.iso($0).map { ($0, String?.none) } },
-                    weeks: weeks, now: now)
+        weeklySeries(dates: timestamps.compactMap { DateParse.iso($0) }, weeks: weeks, now: now)
+    }
+
+    /// Same, over dates parsed ONCE at snapshot time (`LeadFacets.createdAt`).
+    /// Re-parsing per derive cost more than everything else on this path combined.
+    static func weeklySeries(dates: [Date], weeks: Int, now: Date = Date()) -> Series {
+        weekBuckets(dates.map { ($0, String?.none) }, weeks: weeks, now: now)
+    }
+
+    /// DISTINCT leads messaged anywhere in the window — not the sum of the weekly
+    /// buckets, which counts a lead once per week it was touched.
+    static func distinctLeads(_ events: [DashboardInputs.SentEvent],
+                              weeks: Int, now: Date = Date()) -> Int {
+        let window = weekWindow(weeks: weeks, now: now)
+        guard let start = window.first, let end = window.last else { return 0 }
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
+        // `end` is the START of the final week; include that whole week.
+        let cutoff = cal.date(byAdding: .weekOfYear, value: 1, to: end) ?? end
+        var ids = Set<String>()
+        for event in events {
+            guard let date = DateParse.iso(event.sentAt), date >= start, date < cutoff else { continue }
+            ids.insert(event.leadID)
+        }
+        return ids.count
     }
 
     /// Distinct LEADS messaged per week (dedup by `lead_id` within a week) over the
@@ -396,17 +440,10 @@ extension ABLeadsData {
     /// once per (week, key).
     private static func weekBuckets(_ items: [(date: Date, key: String?)],
                                     weeks: Int, now: Date) -> Series {
-        let n = max(1, weeks)
         var cal = Calendar(identifier: .iso8601)
         cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
-
-        let nowComps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
-        guard let thisWeek = cal.date(from: nowComps) else { return Series(weeks: [], values: []) }
-
-        var weekStarts: [Date] = []
-        for i in stride(from: n - 1, through: 0, by: -1) {   // oldest → newest
-            if let d = cal.date(byAdding: .weekOfYear, value: -i, to: thisWeek) { weekStarts.append(d) }
-        }
+        let weekStarts = weekWindow(weeks: weeks, now: now)
+        guard !weekStarts.isEmpty else { return Series(weeks: [], values: []) }
         let index = Dictionary(weekStarts.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         var values = [Int](repeating: 0, count: weekStarts.count)
         var seen = Set<String>()   // "<weekIdx>|<key>" for distinct-per-week dedup
@@ -427,5 +464,19 @@ extension ABLeadsData {
         label.dateFormat = "MMM d"
         label.timeZone = cal.timeZone
         return Series(weeks: weekStarts.map { label.string(from: $0) }, values: values)
+    }
+
+    /// The `weeks` consecutive ISO-week starts (UTC) ending at the week containing
+    /// `now`, oldest first. One definition of the window, shared by the bucketer and
+    /// the distinct-lead total, so the chart and its footer can't cover different
+    /// spans.
+    private static func weekWindow(weeks: Int, now: Date) -> [Date] {
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
+        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+        guard let thisWeek = cal.date(from: comps) else { return [] }
+        return stride(from: max(1, weeks) - 1, through: 0, by: -1).compactMap {
+            cal.date(byAdding: .weekOfYear, value: -$0, to: thisWeek)
+        }
     }
 }

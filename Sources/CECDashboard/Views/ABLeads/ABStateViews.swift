@@ -79,6 +79,61 @@ struct ABErrorView: View {
     }
 }
 
+/// Named degraded reads, shown beside the header stats. A bare `partial` flag was
+/// carried through the whole pipeline and rendered NOWHERE: a failed `replies` read
+/// looked exactly like a book with no replies (same pink 0.0%), and a failed
+/// `send_queue` read drew a confident flat-zero outreach trend. This says which
+/// figures are understated, in the user's words.
+struct ABDegradedChip: View {
+    let reads: [String]
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: DesignTokens.space1) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+            Text(reads.count == 1 ? "\(reads[0]) unavailable" : "\(reads.count) reads failed")
+                .font(.adventor(DesignTokens.textXs, bold: true))
+        }
+        .foregroundStyle(DesignTokens.statusRedText)
+        .padding(.horizontal, DesignTokens.space2)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(DesignTokens.statusRedBg))
+        .overlay(Capsule().strokeBorder(
+            DesignTokens.statusRedText.opacity(hovering ? 0.7 : 0.35), lineWidth: 1))
+        .animation(ABMotion.fast, value: hovering)
+        .onHover { hovering = $0 }
+        .help("These reads failed on the last load, so figures derived from them are "
+            + "understated, not zero: \(reads.joined(separator: ", ")). Refresh to retry.")
+        .accessibilityLabel("Degraded data: \(reads.joined(separator: ", ")) unavailable")
+    }
+}
+
+/// Persistent marker for the dev-only offline fixture mode. Unconditional and
+/// unmissable: a window of invented figures that looks exactly like the live one is
+/// worse than having no offline mode.
+struct ABFixtureBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: DesignTokens.space2) {
+            Image(systemName: "testtube.2")
+                .font(.system(size: 11))
+            Text(message)
+                .font(.adventor(DesignTokens.textXs, bold: true))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(DesignTokens.statusRedText)
+        .padding(.horizontal, DesignTokens.space3)
+        .padding(.vertical, DesignTokens.space2)
+        .background(RoundedRectangle(cornerRadius: DesignTokens.radiusMd)
+            .fill(DesignTokens.statusRedBg))
+        .overlay(RoundedRectangle(cornerRadius: DesignTokens.radiusMd)
+            .strokeBorder(DesignTokens.statusRedText.opacity(0.55), lineWidth: 1))
+    }
+}
+
 /// Slim banner shown above the last-good data when a refresh failed (Loadable
 /// `.stale`) — a warm, low-chroma note so degraded data is never mistaken for fresh.
 struct ABStaleBanner: View {

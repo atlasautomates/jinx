@@ -9,6 +9,13 @@ struct ABTrendChart: View {
     let weeks: [String]
     let values: [Int]
     let role: Role
+    /// Window-wide total, when summing the buckets would NOT give it. The messaged
+    /// series counts distinct leads PER WEEK, so its sum is lead-weeks: a lead
+    /// messaged in three weeks would read as three leads under a chart titled
+    /// "Leads messaged". nil → the sum is the honest total (leads added).
+    var distinctTotal: Int? = nil
+    /// Names what the total counts when it isn't simply "leads".
+    var totalLabel: String = "total"
 
     @State private var hovering = false
 
@@ -17,7 +24,7 @@ struct ABTrendChart: View {
     private var accentBorder: Color { role == .teal ? DesignTokens.accentBorder : DesignTokens.accentPinkBorder }
 
     private var latest: Int { values.last ?? 0 }
-    private var total: Int { values.reduce(0, +) }
+    private var total: Int { distinctTotal ?? values.reduce(0, +) }
     // max(1, …) guards the all-zero / empty series: `peak` is the plot's divisor
     // (maxV below), so a 0 here would make every plotted y NaN. Never divides by zero.
     private var peak: Int { max(1, values.max() ?? 1) }
@@ -49,7 +56,7 @@ struct ABTrendChart: View {
                     Text(total, format: .number)
                         .font(.abMono(DesignTokens.textXs, weight: .semibold))
                         .foregroundStyle(DesignTokens.textSecondary)
-                    Text("total").font(.adventor(DesignTokens.textXs)).foregroundStyle(DesignTokens.textMuted)
+                    Text(totalLabel).font(.adventor(DesignTokens.textXs)).foregroundStyle(DesignTokens.textMuted)
                 }
                 Spacer()
                 Text(weeks.last ?? "").font(.abMono(DesignTokens.textXs)).foregroundStyle(DesignTokens.textGhost)
@@ -133,7 +140,11 @@ struct ABTrendRow: View {
                 .frame(maxWidth: .infinity)
             ABTrendChart(title: "Leads messaged / week",
                          weeks: data.leadsMessagedWeekly.weeks, values: data.leadsMessagedWeekly.values,
-                         role: .pink)
+                         role: .pink,
+                         // Distinct leads over the window — summing the weekly
+                         // buckets would count a lead once per week it was touched.
+                         distinctTotal: data.leadsMessagedTotal,
+                         totalLabel: "leads reached")
                 .frame(maxWidth: .infinity)
         }
     }

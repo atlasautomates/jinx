@@ -16,6 +16,8 @@ struct RootView: View {
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
+    /// When the Leads data on screen was loaded — rendered as "as of HH:mm".
+    @State private var loadedAt: Date? = nil
 
     var body: some View {
         TabView {
@@ -47,9 +49,10 @@ struct RootView: View {
         .task { if !LeadsFixtureSource.isRequested { await backlogModel.load() } }
         .task { if !LeadsFixtureSource.isRequested { await pipelinePolling() } }
         .task { if !LeadsFixtureSource.isRequested { await periodicRefresh() } }
+        .task { await refreshOnWake() }
     }
 
-    /// Normal launch → live fetch. `--fixture` (dev-only) → synthetic book, no
+    /// Normal launch → live fetch. `--fixture` (DEBUG-only) → synthetic book, no
     /// Keychain and no network, so the REAL window can be driven offline while
     /// iterating on layout the still harness cannot capture (scroll behaviour).
     private func initialLeadsLoad() async {
@@ -57,8 +60,42 @@ struct RootView: View {
             model.loadFixture()
             searchModel.fixtureRows = model.snapshotLeads
         } else {
+            // Never leave a fixture book behind a live snapshot: search would keep
+            // answering from synthetic rows while the tab showed real ones.
+            searchModel.fixtureRows = nil
+            loadedAt = Date()
             await model.load()
         }
+    }
+
+    /// Re-fetch when the machine wakes or the app is brought forward.
+    ///
+    /// `periodicRefresh` is a `Task.sleep` loop, and that clock does not advance
+    /// while the Mac is asleep — a lid opened after a weekend resumes mid-interval
+    /// and keeps painting pre-sleep numbers. (The "as of HH:mm" stamp in the header
+    /// is the belt to this pair of braces.)
+    private func refreshOnWake() async {
+        guard !LeadsFixtureSource.isRequested else { return }
+        let center = NotificationCenter.default
+        let workspace = NSWorkspace.shared.notificationCenter
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                for await _ in workspace.notifications(named: NSWorkspace.didWakeNotification) {
+                    await reloadLeads()
+                }
+            }
+            group.addTask { @MainActor in
+                for await _ in center.notifications(named: NSApplication.didBecomeActiveNotification) {
+                    await reloadLeads()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func reloadLeads() async {
+        loadedAt = Date()
+        await model.load()
     }
 
     /// Re-fetch Leads + Campaigns + backlog every 10 minutes while the app is open.
@@ -118,7 +155,7 @@ struct RootView: View {
         if let data = model.state.value {
             liveLeads(data, staleMessage: model.state.staleMessage)
         } else if case .failed(let message) = model.state {
-            ABErrorView(message: message, onRetry: { Task { await model.load() } })
+            ABErrorView(message: message, onRetry: { retryLeads() })
         } else {
             ABLoadingView()
         }
@@ -128,15 +165,21 @@ struct RootView: View {
     /// live re-fetch, stale banner when a refresh degraded, filter bar → local
     /// re-derivation, search box → server query over the whole book.
     private func liveLeads(_ data: ABLeadsData, staleMessage: String?) -> some View {
-        ABLeadsView(
+        let fixture = LeadsFixtureSource.isRequested
+        return ABLeadsView(
             data: data,
             onSelectLead: { lead in
                 guard let id = lead.leadID else { return }
                 profilePresenter.active = LeadRef(id: id, companyName: lead.company, email: nil)
             },
-            onRefresh: { Task { await model.load() } },
+            // In fixture mode a refresh would perform the REAL Keychain + network
+            // load, replacing (or, on failure, re-labelling) synthetic rows as live
+            // ones. The view treats nil as "no refresh control".
+            onRefresh: fixture ? nil : { Task { await model.load() } },
             isRefreshing: model.isRefreshing,
             staleMessage: staleMessage,
+            fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
+            loadedAt: fixture ? nil : loadedAt,
             onFilterChange: { model.apply($0) },
             searchQuery: Bindable(searchModel).query,
             searchState: searchModel.state,
@@ -145,10 +188,32 @@ struct RootView: View {
         )
     }
 
+    /// Retry from the error state — offline mode retries the fixture, not the network.
+    private func retryLeads() {
+        if LeadsFixtureSource.isRequested {
+            model.loadFixture()
+            searchModel.fixtureRows = model.snapshotLeads
+        } else {
+            Task { await model.load() }
+        }
+    }
+
     // MARK: - Campaigns tab (fixed deterministic layout; no Re-layout button)
 
     @ViewBuilder
     private var campaignsTab: some View {
+        if LeadsFixtureSource.isRequested {
+            // These tabs are never loaded offline; an indefinite spinner would be
+            // indistinguishable from a hung fetch.
+            ABErrorView(message: "Offline fixture mode — this tab needs live credentials.",
+                        onRetry: nil)
+        } else {
+            campaignsLive
+        }
+    }
+
+    @ViewBuilder
+    private var campaignsLive: some View {
         switch campaignModel.state {
         case .idle, .loading:
             LoadingView()

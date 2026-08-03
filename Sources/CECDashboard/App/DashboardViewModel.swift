@@ -20,22 +20,23 @@ final class DashboardViewModel {
     /// behind the filter the bar is drawing.
     private(set) var filter: LeadFilter = .all
 
-    /// The last successful fetch, kept so a filter change is a local re-derivation
-    /// rather than a network round trip.
-    private var snapshot: DashboardInputs?
+    /// The last successful fetch, with its per-lead facets already derived, so a
+    /// filter change is a local re-tally rather than a re-derivation (which cost
+    /// 46 ms at today's book size and 414 ms at the repository's page ceiling —
+    /// on the main actor, per menu pick).
+    private var snapshot: LeadSnapshot?
 
-    /// Dev-only offline load (`--fixture`): the same map/filter path over a
-    /// synthetic book, so the LIVE window can be driven without Keychain or
-    /// network. Never reachable in a normal launch — `RootView` calls it only
-    /// when the flag is present.
+    /// Dev-only offline load: the same map/filter path over a synthetic book, so the
+    /// LIVE window can be driven without Keychain or network. Debug builds only —
+    /// see `LeadsFixtureSource`.
     func loadFixture() {
-        let inputs = LeadsFixtureSource.inputs()
-        snapshot = inputs
-        state = .loaded(ABLeadsData(inputs: inputs, filter: filter))
+        let snap = LeadSnapshot(LeadsFixtureSource.inputs())
+        snapshot = snap
+        state = .loaded(ABLeadsData(snapshot: snap, filter: filter))
     }
 
     /// The loaded lead rows (fixture search runs against these).
-    var snapshotLeads: [LeadRow] { snapshot?.leads ?? [] }
+    var snapshotLeads: [LeadRow] { snapshot?.inputs.leads ?? [] }
 
     /// Fetch + map. Keeps the last good value on screen during a refresh, and
     /// degrades to `.stale` (data + reason) rather than `.failed` if one was present.
@@ -44,28 +45,47 @@ final class DashboardViewModel {
     func load() async {
         // In-flight guard: overlapping loads (double-click, retry during a slow fetch)
         // would race on `state` and could clobber fresh data with an older response.
-        // Race-free because the VM is @MainActor.
+        // Race-free because the VM is @MainActor and there is no await between the
+        // check and the set.
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
-        let previous = state.value
-        if previous == nil { state = .loading }
+        if state.value == nil { state = .loading }
 
         do {
-            let client = try SupabaseClient.make()
-            let repo = LeadsRepository(client: client)
-            let inputs = try await repo.fetch()
-            snapshot = inputs
-            state = .loaded(ABLeadsData(inputs: inputs, filter: filter))
+            let inputs = try await Self.fetchInputs()
+            let snap = LeadSnapshot(inputs)
+            snapshot = snap
+            state = .loaded(ABLeadsData(snapshot: snap, filter: filter))
+        } catch is CancellationError {
+            // The window is going away (or a newer load superseded us). Writing a
+            // stale banner on the way out would report teardown as a network fault.
+            return
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            if let previous {
-                state = .stale(previous, since: Date(), message: message)
+            // Re-derive from what is CURRENT rather than reusing a value captured
+            // before the await: `@MainActor` is reentrant, so the user can change a
+            // filter while this fetch is suspended, and writing back the pre-change
+            // data would silently revert their pick.
+            if let snapshot {
+                state = .stale(ABLeadsData(snapshot: snapshot, filter: filter),
+                               since: Date(), message: message)
             } else {
                 state = .failed(message: message)
             }
         }
+    }
+
+    /// The network side of `load()`, hoisted out of the main actor.
+    ///
+    /// `nonisolated` is load-bearing: an unstructured `Task {}` created inside a
+    /// `@MainActor` type INHERITS that isolation (SE-0304), so building the client
+    /// inline ran `SecItemCopyMatching` — a synchronous Security-framework call that
+    /// can block, and can prompt — on the main thread.
+    private nonisolated static func fetchInputs() async throws -> DashboardInputs {
+        let client = try SupabaseClient.make()
+        return try await LeadsRepository(client: client).fetch()
     }
 
     /// Apply a new lens and re-derive every figure from the snapshot in memory.
@@ -84,7 +104,7 @@ final class DashboardViewModel {
     /// data really is still stale — re-deriving it doesn't make it fresh.
     private func remap() {
         guard let snapshot else { return }
-        let mapped = ABLeadsData(inputs: snapshot, filter: filter)
+        let mapped = ABLeadsData(snapshot: snapshot, filter: filter)
         switch state {
         case .stale(_, let since, let message):
             state = .stale(mapped, since: since, message: message)

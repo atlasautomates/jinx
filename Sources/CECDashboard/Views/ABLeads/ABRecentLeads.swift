@@ -102,6 +102,17 @@ private struct ABLeadRow: View {
         .contentShape(Rectangle())
         .animation(ABMotion.fast, value: active)
         .onHover { hovering = $0 }
+        // A bare `.onTapGesture` carries no button trait and no accessibility
+        // action: VoiceOver announced the row as a run of static text and could not
+        // open the profile, which made every search hit mouse-only — in the one
+        // feature whose entire purpose is finding a specific lead.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selectable ? .isButton : [])
+        .accessibilityLabel(selectable
+            ? "\(lead.company), \(lead.industry), \(lead.location), \(lead.status)"
+            : "\(lead.company), \(lead.status)")
+        .accessibilityHint(selectable ? "Opens the lead profile" : "")
+        .accessibilityAction { if selectable { onSelect?(lead) } }
         .onTapGesture { if selectable { onSelect?(lead) } }
     }
 }
@@ -242,9 +253,13 @@ struct ABRecentLeadsTable: View {
             .fixedSize(horizontal: false, vertical: true)   // see ABLeadRowsTable
 
             if leads.isEmpty {
-                ABMessageRow(icon: "line.3.horizontal.decrease",
-                             text: "No lead matches this filter.", tone: .muted)
-                Spacer(minLength: 0)
+                // Don't blame a filter that isn't set: an empty book (or an empty
+                // snapshot) would otherwise read as a filter artifact.
+                ABMessageRow(icon: filterSummary == nil ? "tray" : "line.3.horizontal.decrease",
+                             text: filterSummary == nil
+                                 ? "No leads loaded yet."
+                                 : "No lead matches this filter.",
+                             tone: .muted, centered: true)
             } else {
                 ABLeadRowsTable(leads: leads, forcedHoverIndex: forcedHoverIndex,
                                 staticRender: staticRender, onSelect: onSelect)

@@ -48,6 +48,10 @@ enum DesignTokens {
     static let accent = Color.oklch(0.84, 0.115, viewHue)
     static let accentBg = Color.oklch(0.84, 0.115, viewHue, alpha: 0.1)
     static let accentBorder = Color.oklch(0.84, 0.115, viewHue, alpha: 0.34)
+    /// Hover step for a surface ALREADY carrying `accentBg` (an active filter pill).
+    /// Without it the accent ladder has no rung above "selected", and the controls
+    /// the user clicks most answer a pointer with nothing.
+    static let accentBgHover = Color.oklch(0.84, 0.115, viewHue, alpha: 0.2)
     static let accentPink = Color.oklch(0.74, 0.155, 350)
     static let accentPinkBg = Color.oklch(0.74, 0.155, 350, alpha: 0.12)
     static let accentPinkBorder = Color.oklch(0.74, 0.155, 350, alpha: 0.34)
@@ -84,6 +88,13 @@ enum DesignTokens {
     static let textSecondary = Color.oklch(0.805, 0.02, 192)
 
     // MARK: Spacing / radius / lengths (pt)
+    /// One control height for every pill/chip/field in the tab header — they used
+    /// to disagree by an unmotivated 2px (5 vs 6).
+    static let controlPaddingY: CGFloat = 6
+    /// Widest a filter pill's selected VALUE may grow before truncating, and the
+    /// search field's width. Both are layout constants, not spacing steps.
+    static let filterValueMaxWidth: CGFloat = 152
+    static let searchFieldWidth: CGFloat = 304
     static let radiusLg: CGFloat = 12
     static let radiusMd: CGFloat = 8
     static let radiusPill: CGFloat = 9999

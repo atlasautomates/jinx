@@ -37,6 +37,11 @@ struct DashboardInputs: Sendable {
     /// True when a supplementary read FAILED (vs. genuinely empty) — surfaced in the
     /// UI so degraded data is never mistaken for complete data.
     var partial: Bool = false
+    /// WHICH reads failed, in user-facing words ("replies", "outreach history").
+    /// A bare `partial` flag was not enough: a failed `replies` read renders
+    /// pixel-identically to a book with no replies, and a failed `send_queue` read
+    /// draws a confident flat-zero outreach trend. The UI names what is understated.
+    var degradedReads: [String] = []
     /// Sent emails over the recent window (`send_queue`, `status=sent`,
     /// supplementary, fail-open to empty) — carries `lead_id` so the "messaged /
     /// week" trend can count DISTINCT leads per week (not send steps) and can be

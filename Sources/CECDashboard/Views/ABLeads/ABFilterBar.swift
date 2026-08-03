@@ -9,12 +9,19 @@ import SwiftUI
 
 struct ABFilterBar: View {
     let data: ABLeadsData
+    /// True while search results own the list column. The pills then read as
+    /// inactive: search deliberately ignores filters, so a lit teal pill would be
+    /// asserting a scope over rows it does not govern.
+    var searching: Bool = false
     /// Called with the new filter whenever a menu changes. The view model owns the
     /// value — this view never mutates it locally, so what the bar draws and what
     /// the numbers were computed from cannot drift.
     var onChange: (LeadFilter) -> Void = { _ in }
     @Environment(\.isStaticRender) private var isStaticRender
 
+    /// The bar edits the REQUESTED filter, never the effective one: when a
+    /// dimension is suppressed (degraded lane reads), editing the effective value
+    /// would write the suppression back and permanently discard the user's pick.
     private var filter: LeadFilter { data.filter }
 
     var body: some View {
@@ -24,14 +31,17 @@ struct ABFilterBar: View {
                 .foregroundStyle(filter.isActive ? DesignTokens.accent : DesignTokens.textGhost)
 
             if data.laneFilterAvailable {
+                // Keyed on `rawValue`, not on the display label: routing a selection
+                // back through human-readable text means renaming a label silently
+                // breaks the control (the lookup returns nil and reads as "All").
                 ABFilterMenu(
-                    title: "Lane", selection: filter.lane?.label,
-                    options: data.facets.lanes.map { .init(value: $0.lane.label, count: $0.count) },
+                    title: "Lane", selection: filter.lane?.rawValue,
+                    display: { LeadFilter.Lane(rawValue: $0)?.label ?? $0 },
+                    options: data.facets.lanes.map { .init(value: $0.lane.rawValue, count: $0.count) },
+                    dimmed: searching,
                     onPick: { picked in
                         var next = filter
-                        next.lane = picked.flatMap { label in
-                            LeadFilter.Lane.allCases.first { $0.label == label }
-                        }
+                        next.lane = picked.flatMap(LeadFilter.Lane.init(rawValue:))
                         onChange(next)
                     })
             } else {
@@ -41,20 +51,23 @@ struct ABFilterBar: View {
             }
 
             ABFilterMenu(title: "Region", selection: filter.region, options: data.facets.regions,
+                         dimmed: searching,
                          onPick: { picked in
                              var next = filter; next.region = picked; onChange(next)
                          })
             ABFilterMenu(title: "Source", selection: filter.source, options: data.facets.sources,
+                         dimmed: searching,
                          onPick: { picked in
                              var next = filter; next.source = picked; onChange(next)
                          })
             ABFilterMenu(title: "Industry", selection: filter.industry, options: data.facets.industries,
+                         dimmed: searching,
                          onPick: { picked in
                              var next = filter; next.industry = picked; onChange(next)
                          })
 
             if filter.isActive {
-                ABClearFiltersButton(count: data.matchingCount) { onChange(.all) }
+                ABClearFiltersButton(count: data.matchingCount, dimmed: searching) { onChange(.all) }
             }
 
             Spacer(minLength: 0)
@@ -77,12 +90,17 @@ struct ABFilterBar: View {
 private struct ABFilterMenu: View {
     let title: String
     let selection: String?
+    /// Maps a stored option value to its display text (identity by default; the
+    /// lane menu stores `rawValue` and displays a human label).
+    var display: (String) -> String = { $0 }
     let options: [FilterFacets.Option]
+    /// Draw as inactive even when set — search results don't obey these.
+    var dimmed: Bool = false
     let onPick: (String?) -> Void
     @State private var hovering = false
     @Environment(\.isStaticRender) private var isStaticRender
 
-    private var active: Bool { selection != nil }
+    private var active: Bool { selection != nil && !dimmed }
 
     var body: some View {
         // `Menu` is AppKit-backed: ImageRenderer paints a yellow placeholder over
@@ -106,7 +124,7 @@ private struct ABFilterMenu: View {
                         // toggle, which is what a single-select filter should feel like.
                         onPick(option.value == selection ? nil : option.value)
                     } label: {
-                        Text("\(option.value)  (\(option.count))")
+                        Text("\(display(option.value))  (\(option.count))")
                     }
                 }
             } label: {
@@ -118,7 +136,10 @@ private struct ABFilterMenu: View {
             .fixedSize()
             .pillChrome(active: active, hovering: hovering)
             .onHover { hovering = $0 }
-            .help(active ? "\(title): \(selection ?? "")" : "Filter by \(title.lowercased())")
+            .help(active ? "\(title): \(selection.map(display) ?? "")"
+                         : "Filter by \(title.lowercased())")
+            .accessibilityLabel("Filter by \(title.lowercased())")
+            .accessibilityValue(selection.map(display) ?? "All")
         }
     }
 
@@ -126,34 +147,47 @@ private struct ABFilterMenu: View {
         HStack(spacing: DesignTokens.space1) {
             Text(active ? title.uppercased() : title)
                 .font(.adventor(DesignTokens.textXs, bold: active))
-                .tracking(active ? 0.8 : 0)
+                // Matches ABSectionLabel's tracking: same uppercase/bold/textXs role,
+                // so the two must not disagree by 0.6pt.
+                .tracking(active ? 1.4 : 0)
                 .foregroundStyle(active ? DesignTokens.accent : DesignTokens.textMuted)
             if let selection {
-                Text(selection)
+                Text(display(selection))
                     .font(.adventor(DesignTokens.textXs, bold: true))
-                    .foregroundStyle(DesignTokens.textPrimary)
+                    .foregroundStyle(active ? DesignTokens.textPrimary : DesignTokens.textMuted)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 150, alignment: .leading)
+                    .frame(maxWidth: DesignTokens.filterValueMaxWidth, alignment: .leading)
             }
             Image(systemName: "chevron.down")
                 .font(.system(size: 8, weight: .semibold))
                 .foregroundStyle(active ? DesignTokens.accent : DesignTokens.textGhost)
+                // Decorative: VoiceOver otherwise reads "Region, Chevron Down, pop
+                // up button".
+                .accessibilityHidden(true)
         }
     }
 }
 
-private extension View {
+extension View {
     /// The filter bar's pill: one surface step, teal identity only when the
     /// dimension is set (bible §1 — colour serves hierarchy).
+    ///
+    /// The ACTIVE state has its own hover step. It used to consume the whole
+    /// channel — `active ? accentBg : (hovering ? …)` — so the pills the user
+    /// clicks most, the ones already set, were the only controls on the tab that
+    /// answered a pointer with nothing. Same failure class as the copy-target
+    /// finding in learnings.md: an emphasis state eating the channel feedback
+    /// needed.
     func pillChrome(active: Bool, hovering: Bool) -> some View {
         self
             .padding(.horizontal, DesignTokens.space2)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(active ? DesignTokens.accentBg
-                                              : (hovering ? DesignTokens.bgHighlight : Color.clear)))
+            .padding(.vertical, DesignTokens.controlPaddingY)
+            .background(Capsule().fill(
+                active ? (hovering ? DesignTokens.accentBgHover : DesignTokens.accentBg)
+                       : (hovering ? DesignTokens.bgHighlight : Color.clear)))
             .overlay(Capsule().strokeBorder(
-                active ? DesignTokens.accentBorder
+                active ? (hovering ? DesignTokens.accentStrong : DesignTokens.accentBorder)
                        : (hovering ? DesignTokens.borderHover : DesignTokens.borderDefault),
                 lineWidth: 1))
             .contentShape(Capsule())
@@ -175,7 +209,7 @@ private struct ABUnavailableChip: View {
         }
         .foregroundStyle(DesignTokens.textGhost)
         .padding(.horizontal, DesignTokens.space2)
-        .padding(.vertical, 5)
+        .padding(.vertical, DesignTokens.controlPaddingY)
         .overlay(Capsule().strokeBorder(DesignTokens.borderSubtle, lineWidth: 1))
         .help("Lane data could not be read on this load — filtering by it would be wrong.")
     }
@@ -184,6 +218,7 @@ private struct ABUnavailableChip: View {
 /// Clears every dimension at once, and states what the current lens is showing.
 private struct ABClearFiltersButton: View {
     let count: Int
+    var dimmed: Bool = false
     let action: () -> Void
     @State private var hovering = false
 
@@ -192,7 +227,7 @@ private struct ABClearFiltersButton: View {
             HStack(spacing: DesignTokens.space1) {
                 Text(count, format: .number)
                     .font(.abMono(DesignTokens.textXs, weight: .semibold))
-                    .foregroundStyle(DesignTokens.accent)
+                    .foregroundStyle(dimmed ? DesignTokens.textMuted : DesignTokens.accent)
                 Text(count == 1 ? "lead" : "leads")
                     .font(.adventor(DesignTokens.textXs))
                     .foregroundStyle(DesignTokens.textMuted)
@@ -201,7 +236,7 @@ private struct ABClearFiltersButton: View {
                     .foregroundStyle(hovering ? DesignTokens.textPrimary : DesignTokens.textMuted)
             }
             .padding(.horizontal, DesignTokens.space2)
-            .padding(.vertical, 5)
+            .padding(.vertical, DesignTokens.controlPaddingY)
             .background(Capsule().fill(hovering ? DesignTokens.bgHighlight : Color.clear))
             .overlay(Capsule().strokeBorder(
                 hovering ? DesignTokens.borderHover : DesignTokens.borderSubtle, lineWidth: 1))
@@ -211,5 +246,6 @@ private struct ABClearFiltersButton: View {
         .onHover { hovering = $0 }
         .animation(ABMotion.fast, value: hovering)
         .help("Clear all filters")
+        .accessibilityLabel("Clear all filters, showing \(count) leads")
     }
 }

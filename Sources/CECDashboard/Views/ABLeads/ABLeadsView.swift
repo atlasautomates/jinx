@@ -24,6 +24,12 @@ struct ABLeadsView: View {
     var isRefreshing: Bool = false
     /// When set, a slim "showing last data" banner rides above the content.
     var staleMessage: String? = nil
+    /// When set, an unmissable banner marks the dev-only offline fixture mode.
+    var fixtureNotice: String? = nil
+    /// When the data on screen was loaded ("as of 14:32"). Nothing else on the tab
+    /// states the numbers' age, and the poll loop is a plain sleep — a lid opened
+    /// after a weekend otherwise reads as current.
+    var loadedAt: Date? = nil
     /// Filter changes (live tab). nil = the bar is inert (fixture/harness path).
     var onFilterChange: ((LeadFilter) -> Void)? = nil
     /// Search box binding + actions. nil = no search box (fixture/harness path,
@@ -64,9 +70,11 @@ struct ABLeadsView: View {
     @ViewBuilder
     private var stack: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space4) {
+            if let fixtureNotice { ABFixtureBanner(message: fixtureNotice) }
             if let staleMessage { ABStaleBanner(message: staleMessage) }
             header
-            ABFilterBar(data: data, onChange: onFilterChange ?? { _ in })      // lens
+            ABFilterBar(data: data, searching: searching,
+                        onChange: onFilterChange ?? { _ in })                 // lens
             ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)       // level 1
             ABTrendRow(data: data)                                            // level 2
 
@@ -137,9 +145,11 @@ struct ABLeadsView: View {
             }
             Spacer(minLength: DesignTokens.space4)
             HStack(spacing: DesignTokens.space4) {
+                if !data.degradedReads.isEmpty { ABDegradedChip(reads: data.degradedReads) }
                 summaryStat(value: data.totals.scraped, label: "scraped", color: DesignTokens.textSecondary)
                 summaryStat(value: data.totals.emailed, label: "emailed", color: DesignTokens.accent)
                 summaryStat(value: data.totals.replies, label: "replies", color: DesignTokens.accentPink)
+                if let loadedAt { ABLoadedStamp(at: loadedAt) }
                 // Live only: nil in the fixture/harness path → header stays frozen.
                 if let onRefresh {
                     ABRefreshButton(isRefreshing: isRefreshing, action: onRefresh)
@@ -157,6 +167,27 @@ struct ABLeadsView: View {
                 .font(.adventor(DesignTokens.textSm))
                 .foregroundStyle(DesignTokens.textMuted)
         }
+    }
+}
+
+/// "as of HH:mm" beside the header stats. The tab polls on a plain sleep timer,
+/// which does not advance across system sleep — without a stamp, numbers loaded
+/// before a weekend read as current.
+private struct ABLoadedStamp: View {
+    let at: Date
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    var body: some View {
+        Text("as of \(Self.formatter.string(from: at))")
+            .font(.abMono(DesignTokens.textXs))
+            .foregroundStyle(DesignTokens.textGhost)
+            .help("When this data was loaded. Refresh to update.")
     }
 }
 

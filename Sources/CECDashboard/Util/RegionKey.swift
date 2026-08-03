@@ -29,32 +29,44 @@ enum RegionKey {
             // to one label so the two scraper conventions share a bucket.
             return usState(raw) ?? raw
         }
-        if let parsed = fromLocation(location) { return parsed }
+        // The country column is passed INTO the location parse, not consulted after
+        // it: `source-jobsignal` writes location "San Francisco, CA" with country
+        // "US" and no state, and a parse that ignores the column falls through to a
+        // bucket literally named "CA" sitting beside "California" — the exact split
+        // this type exists to prevent (QA found 3 live leads in it).
+        if let parsed = fromLocation(location, country: country) { return parsed }
         if let raw = country?.nilIfEmpty {
             return isUSMarker(raw) ? unitedStates : raw
         }
         return unknown
     }
 
-    /// Parse a free-text location. nil when there is nothing to parse.
-    static func fromLocation(_ location: String?) -> String? {
+    /// Parse a free-text location, with the row's `country` column as corroborating
+    /// evidence for US-state abbreviations. nil when there is nothing to parse.
+    static func fromLocation(_ location: String?, country: String? = nil) -> String? {
         guard let raw = location?.nilIfEmpty else { return nil }
         let tokens = raw.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard !tokens.isEmpty else { return nil }
+        let inUS = tokens.contains(where: isUSMarker)
+            || (country?.nilIfEmpty).map(isUSMarker) == true
 
         // 1. A full US state name anywhere wins — innermost first, so
         //    "Los Angeles County, California, United States" reads California.
         //    Decorations are stripped so "Texas Metropolitan Area" still matches.
+        //    EXCEPT the names that are also countries (Georgia): those need US
+        //    corroboration, or "Tbilisi, Georgia" silently joins Atlanta's bucket.
         for token in tokens.reversed() {
-            if let state = usStateFullName(undecorated(token)) { return state }
+            guard let state = usStateFullName(undecorated(token)) else { continue }
+            if alsoCountryNames.contains(state) && !inUS { continue }
+            return state
         }
 
-        // 2. Two-letter abbreviations are only trusted when the string itself says
-        //    United States — bare "DE" is Delaware in Florida-shaped data and
-        //    Germany in LinkedIn-shaped data, and nothing else disambiguates it.
-        if tokens.contains(where: isUSMarker) {
+        // 2. Two-letter abbreviations are only trusted when something says United
+        //    States — bare "DE" is Delaware in Maps-shaped data and Germany in
+        //    LinkedIn-shaped data, and nothing else disambiguates it.
+        if inUS {
             for token in tokens.reversed() {
                 if let state = usStateAbbreviation(undecorated(token)) { return state }
             }
@@ -67,7 +79,14 @@ enum RegionKey {
         // 4. LinkedIn's free text ends with the country ("…, Mazowieckie, Poland").
         //    A single unrecognized token keeps its own label — it is usually a
         //    country ("Ireland") and never a fabrication either way.
-        return tokens.last
+        guard let last = tokens.last else { return nil }
+        // Disambiguate the one name that is both: skipping the state match above is
+        // not enough on its own, because the country would then fall through to the
+        // IDENTICAL label and land in the same bucket anyway.
+        if let state = usStateFullName(undecorated(last)), alsoCountryNames.contains(state) {
+            return "\(state) (country)"
+        }
+        return last
     }
 
     /// Canonical label for a US state written either way; nil if unrecognized.
@@ -109,6 +128,10 @@ enum RegionKey {
     private static func isUSMarker(_ value: String) -> Bool {
         ["united states", "united states of america", "usa", "us"].contains(normalizedKey(value))
     }
+
+    /// US state names that are also country names. Matching one of these without
+    /// US corroboration would merge two different places into one bucket.
+    private static let alsoCountryNames: Set<String> = ["Georgia"]
 
     /// Metros whose own text names neither a state nor a country.
     private static let metros: [String: String] = [

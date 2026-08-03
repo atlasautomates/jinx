@@ -85,11 +85,14 @@ enum SupabaseCheck {
                        : ", backlog tables UNREADABLE (campaign_leads / v_campaign_ready)")
                 // First page only (this is a readability probe, not a tally) — so
                 // every count below is a floor, spelled "≥".
+                let sentLeads = Set(messaged.events.map(\.leadID)).count
                 let leadsKpiStr = "leads-kpi: replied-leads ≥\(replied.ids.count)"
                     + (replied.ok ? (replied.ids.isEmpty ? " (EMPTY — no replies / no RLS)" : "")
                                   : " (READ FAILED)")
-                    + ", sent(send_queue ≤13wk) ≥\(messaged.count) email(s) to \(Set(messaged.map(\.leadID)).count) lead(s)"
-                    + (messaged.isEmpty ? " (EMPTY — no sends / no RLS on send_queue)" : "")
+                    + ", sent(send_queue ≤13wk) ≥\(messaged.events.count) email(s) to \(sentLeads) lead(s)"
+                    + (messaged.ok ? (messaged.events.isEmpty
+                                        ? " (EMPTY — no sends / no RLS on send_queue)" : "")
+                                   : " (READ FAILED — outreach trend degraded)")
                 let laneStr = "leads-lane: deep-cohort ≥\(deep.ids.count)"
                     + (deep.ok ? "" : " (READ FAILED — Lane filter disabled)")
                     + ", personalized ≥\(personalized.ids.count)"

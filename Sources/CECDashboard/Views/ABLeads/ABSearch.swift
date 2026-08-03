@@ -42,30 +42,60 @@ struct ABSearchField: View {
             }
 
             if !query.isEmpty || hasResults {
-                Button(action: onClear) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(DesignTokens.textGhost)
-                }
-                .buttonStyle(.plain)
-                .help("Clear search")
-                .accessibilityLabel("Clear search")
+                ABClearGlyph(action: onClear)
             }
         }
         .padding(.horizontal, DesignTokens.space3)
-        .padding(.vertical, 6)
+        .padding(.vertical, DesignTokens.controlPaddingY)
         .background(Capsule().fill(DesignTokens.bgSurface))
         .overlay(Capsule().strokeBorder(
             focused ? DesignTokens.accentBorder : DesignTokens.borderDefault, lineWidth: 1))
-        .frame(width: 300)
+        .frame(width: DesignTokens.searchFieldWidth)
         .animation(ABMotion.fast, value: focused)
-        // ⌘F focuses the box from anywhere on the tab.
-        .background {
-            Button("") { focused = true }
-                .keyboardShortcut("f", modifiers: .command)
-                .opacity(0)
-                .accessibilityHidden(true)
+        // ⌘F is published as a focused value so the app's Find command can reach it
+        // (see CECDashboardApp.commands). A hidden Button carrying the shortcut
+        // would collide with the system Edit ▸ Find item — which resolves first —
+        // and would also fire from the other tabs, moving focus into a TextField
+        // nobody can see.
+        .focusedSceneValue(\.leadSearchFocus, LeadSearchFocus { focused = true })
+    }
+}
+
+/// The search box's clear affordance. A `.plain` glyph with a constant colour is
+/// indistinguishable from decoration; this one acknowledges the pointer.
+private struct ABClearGlyph: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(hovering ? DesignTokens.textSecondary : DesignTokens.textGhost)
+                .scaleEffect(hovering ? 1.12 : 1.0)
         }
+        .buttonStyle(.plain)
+        .animation(ABMotion.fast, value: hovering)
+        .onHover { hovering = $0 }
+        .help("Clear search")
+        .accessibilityLabel("Clear search")
+    }
+}
+
+/// Focus hook for the app-level Find command.
+struct LeadSearchFocus {
+    let focus: () -> Void
+    init(_ focus: @escaping () -> Void) { self.focus = focus }
+}
+
+private struct LeadSearchFocusKey: FocusedValueKey {
+    typealias Value = LeadSearchFocus
+}
+
+extension FocusedValues {
+    var leadSearchFocus: LeadSearchFocus? {
+        get { self[LeadSearchFocusKey.self] }
+        set { self[LeadSearchFocusKey.self] = newValue }
     }
 }
 
@@ -85,7 +115,11 @@ struct ABSearchResultsPanel: View {
         }
         .padding(.vertical, DesignTokens.space4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .abSurface(.surface, radius: DesignTokens.radiusLg)
+        // Focus is a depth event: this panel answers the question the user just
+        // asked, so it takes the accent edge rather than wearing the same chrome as
+        // the ambient panels it replaced.
+        .abSurface(.surface, radius: DesignTokens.radiusLg,
+                   accentBorder: DesignTokens.accentBorder)
     }
 
     private var header: some View {
@@ -106,12 +140,7 @@ struct ABSearchResultsPanel: View {
             Text("whole lead book · filters not applied")
                 .font(.adventor(DesignTokens.textXs))
                 .foregroundStyle(DesignTokens.textGhost)
-            Button(action: onClear) {
-                Text("Back to leads")
-                    .font(.adventor(DesignTokens.textXs, bold: true))
-                    .foregroundStyle(DesignTokens.accent)
-            }
-            .buttonStyle(.plain)
+            ABBackToLeadsButton(action: onClear)
         }
         .padding(.horizontal, DesignTokens.space3)
     }
@@ -121,42 +150,94 @@ struct ABSearchResultsPanel: View {
         switch state {
         case .idle:
             EmptyView()
-        case .searching:
-            ABMessageRow(icon: "hourglass", text: "Searching…", tone: .muted)
+        case .searching(let term):
+            ABMessageRow(icon: "hourglass", text: "Searching for “\(term)”…",
+                         tone: .muted, spinning: true, centered: true)
         case .failed(_, let message):
             // A failed search must never look like "no such lead".
-            ABMessageRow(icon: "exclamationmark.triangle", text: message, tone: .warn)
+            ABMessageRow(icon: "exclamationmark.triangle", text: message,
+                         tone: .warn, centered: true)
         case .results(let term, let hits):
             if hits.isEmpty {
                 ABMessageRow(icon: "questionmark.circle",
-                             text: "No lead matches “\(term)”.", tone: .muted)
+                             text: "No lead matches “\(term)”.", tone: .muted, centered: true)
             } else {
                 ABLeadRowsTable(leads: hits, staticRender: staticRender, onSelect: onSelect)
+                    .frame(maxHeight: .infinity, alignment: .top)
             }
         }
     }
 }
 
-/// One-line status row inside a panel (searching / empty / failed).
+/// The escape hatch out of search mode. It is the primary action in this panel and
+/// used to carry less affordance than an inactive filter pill.
+private struct ABBackToLeadsButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: DesignTokens.space1) {
+                Image(systemName: "arrow.uturn.left").font(.system(size: 8, weight: .bold))
+                Text("Back to leads").font(.adventor(DesignTokens.textXs, bold: true))
+            }
+            .foregroundStyle(hovering ? DesignTokens.accentStrong : DesignTokens.accent)
+            .padding(.horizontal, DesignTokens.space2)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(hovering ? DesignTokens.accentBg : Color.clear))
+            .overlay(Capsule().strokeBorder(
+                hovering ? DesignTokens.accentBorder : DesignTokens.borderSubtle, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(ABMotion.fast, value: hovering)
+        .onHover { hovering = $0 }
+        .help("Clear the search and go back to the filtered lead list")
+    }
+}
+
+/// Status row inside a panel (searching / empty / failed). `centered` places it in
+/// the panel's body rather than pinning one muted line to the top-left of a mostly
+/// empty surface, which reads as half-loaded rather than calm.
 struct ABMessageRow: View {
     enum Tone { case muted, warn }
     let icon: String
     let text: String
     var tone: Tone = .muted
+    /// Rotate the glyph while work is genuinely in flight (state-driven, stops the
+    /// moment the result lands — never idle motion).
+    var spinning: Bool = false
+    var centered: Bool = false
+    @Environment(\.isStaticRender) private var isStaticRender
+    @State private var spin = false
 
     private var color: Color {
         tone == .warn ? DesignTokens.statusRedText : DesignTokens.textMuted
     }
 
-    var body: some View {
+    private var row: some View {
         HStack(spacing: DesignTokens.space2) {
-            Image(systemName: icon).font(.system(size: 11))
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .rotationEffect(.degrees(spinning && spin ? 360 : 0))
+                .animation(spinning ? ABMotion.spin : ABMotion.fast, value: spin)
             Text(text).font(.adventor(DesignTokens.textSm))
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+            if !centered { Spacer(minLength: 0) }
         }
         .foregroundStyle(color)
         .padding(.horizontal, DesignTokens.space3)
         .padding(.vertical, DesignTokens.space2)
+        // A still render can't animate; starting the loop there would also make the
+        // harness output non-deterministic.
+        .onAppear { if spinning && !isStaticRender { spin = true } }
+    }
+
+    var body: some View {
+        if centered {
+            row.frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            row
+        }
     }
 }

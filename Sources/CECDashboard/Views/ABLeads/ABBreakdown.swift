@@ -114,16 +114,20 @@ struct ABBreakdownRowGroup: View {
     /// the scope note (when the snapshot itself is a window) applies to all four.
     @ViewBuilder
     private var panels: some View {
+        // Ordered by decision value, not by when they were built: pipeline health
+        // first, then where the leads came from, then who they are. The new "By
+        // region" panel was originally inserted second, which pushed two panels
+        // named in the tab's brief below the fold of a column with no scrollbar.
         VStack(alignment: .leading, spacing: DesignTokens.space2) {
+            ABBreakdownPanel(title: "By status", items: data.byStatus,
+                             colorFor: statusColor,
+                             forcedHoverLabel: forcedHoverStatusLabel,
+                             scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By source", items: data.bySource,
                              scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By region", items: data.byRegion,
                              scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By industry", items: data.byIndustry,
-                             scopeNote: data.breakdownScopeNote)
-            ABBreakdownPanel(title: "By status", items: data.byStatus,
-                             colorFor: statusColor,
-                             forcedHoverLabel: forcedHoverStatusLabel,
                              scopeNote: data.breakdownScopeNote)
         }
     }
@@ -132,10 +136,25 @@ struct ABBreakdownRowGroup: View {
         // Own scroll surface, bounded by the band's height (the page does not
         // scroll) — four panels no longer have to fit a short window.
         if staticRender {
-            panels.frame(maxHeight: .infinity, alignment: .top).clipped()
+            VStack(alignment: .leading, spacing: 0) {
+                panels
+                Spacer(minLength: 0)
+            }
+            .clipped()
         } else {
-            ScrollView { panels }
-                .scrollBounceBehavior(.basedOnSize)
+            ScrollView {
+                VStack(alignment: .leading, spacing: DesignTokens.space2) {
+                    panels
+                    // Says the column continues, in the same words the lead list
+                    // uses — an unscrollbar'd column that simply ends looks complete.
+                    Text("scroll for more")
+                        .font(.adventor(DesignTokens.textXs))
+                        .foregroundStyle(DesignTokens.textGhost)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, DesignTokens.space1)
+                }
+            }
+            .scrollBounceBehavior(.basedOnSize)
         }
     }
 }

@@ -36,7 +36,9 @@ final class LeadSearchModel {
 
     /// The request in flight. Cancelled by the next one so a slow first query can
     /// never land after — and overwrite — the results of a later one.
-    private var inFlight: Task<Void, Never>?
+    private var inFlight: Task<Void, Never>? {
+        didSet { live.set(inFlight) }
+    }
 
     /// Dev-only offline search (`--fixture`): same sanitizer, same result shape,
     /// no network. Set by `RootView` only when the flag is present.
@@ -49,27 +51,39 @@ final class LeadSearchModel {
             clear()
             return
         }
+        inFlight?.cancel()
+        inFlight = nil
         if let fixtureRows {
-            inFlight?.cancel()
             state = .results(term: term,
                              hits: LeadsFixtureSource.search(term, in: fixtureRows)
-                                 .map(ABLeadsData.lead))
+                                 .map { ABLeadsData.lead($0) })
             return
         }
-        inFlight?.cancel()
         state = .searching(term: term)
         inFlight = Task { [weak self] in
             do {
-                let repo = LeadsRepository(client: try client())
-                let rows = try await repo.search(term)
+                // The client is built OFF the main actor: a `Task {}` inside a
+                // @MainActor type inherits that isolation, so constructing it inline
+                // ran the Keychain read on the main thread.
+                let rows = try await Self.runSearch(term, client: client)
                 if Task.isCancelled { return }
-                self?.state = .results(term: term, hits: rows.map(ABLeadsData.lead))
+                self?.state = .results(term: term, hits: rows.map { ABLeadsData.lead($0) })
+                self?.inFlight = nil
+            } catch is CancellationError {
+                return
             } catch {
                 if Task.isCancelled { return }
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 self?.state = .failed(term: term, message: message)
+                self?.inFlight = nil
             }
         }
+    }
+
+    private nonisolated static func runSearch(
+        _ term: String, client: () throws -> SupabaseClient
+    ) async throws -> [LeadRow] {
+        try await LeadsRepository(client: try client()).search(term)
     }
 
     /// Drop the results and the query — the tab returns to its filtered view.
@@ -78,5 +92,19 @@ final class LeadSearchModel {
         inFlight = nil
         query = ""
         state = .idle
+    }
+
+    /// A search outliving its window would hold a URLSession request open to its
+    /// 30s resource ceiling. The handle lives in a box so `deinit` — which is
+    /// nonisolated — can cancel it without touching main-actor state.
+    private let live = TaskBox()
+    deinit { live.cancel() }
+
+    /// Nonisolated holder for the in-flight task handle.
+    private final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: Task<Void, Never>?
+        func set(_ t: Task<Void, Never>?) { lock.lock(); task = t; lock.unlock() }
+        func cancel() { lock.lock(); let t = task; task = nil; lock.unlock(); t?.cancel() }
     }
 }

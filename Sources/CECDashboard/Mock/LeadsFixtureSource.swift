@@ -14,7 +14,21 @@ import Foundation
 enum LeadsFixtureSource {
     static let flag = "--fixture"
 
-    static var isRequested: Bool { CommandLine.arguments.contains(flag) }
+    /// The banner the tab shows for as long as this mode is active. A window full
+    /// of invented figures that looks exactly like the live one is worse than no
+    /// dev mode at all.
+    static let banner = "FIXTURE DATA — synthetic leads, not your live book"
+
+    /// DEBUG-ONLY. In a Release build this is always false, whatever is on the
+    /// command line, so the signed copy in /Applications cannot be talked into
+    /// rendering synthetic numbers by a stale Dock entry or a stray launch argument.
+    static var isRequested: Bool {
+        #if DEBUG
+        return CommandLine.arguments.contains(flag)
+        #else
+        return false
+        #endif
+    }
 
     /// A book big enough to exercise the list cap, every facet menu, and both
     /// lanes. Deterministic: index-derived, no randomness.
