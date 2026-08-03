@@ -23,15 +23,21 @@ struct LeadsRepository {
     /// Essential reads (leads, total count) throw and fail the load; every
     /// supplementary read fails OPEN and only marks the result `partial`.
     func fetch() async throws -> DashboardInputs {
-        async let leadPage = allLeads()
         async let deep = leadIDsResult(table: "lead_enrichment",
                                        filter: URLQueryItem(name: "deep_cohort_run_id", value: "not.is.null"))
         async let personalized = leadIDsResult(table: "lead_enrichment",
                                                filter: URLQueryItem(name: "personalized_opener", value: "not.is.null"))
         async let replied = leadIDsResult(table: "replies", filter: nil)
         async let messaged = messagedSendsResult()
+        let page = try await allLeads()
+        // The count is sampled AFTER the walk, not concurrently with it. Concurrently
+        // it is a T0 sample while the walk covers [T0, T0+Δ] — and because `leads.id`
+        // is a random uuid, a row inserted mid-walk lands below the cursor about half
+        // the time and is missed forever, while `distinct >= totalCount(T0)` still
+        // holds. The completeness flag would then be satisfied by exactly the loss it
+        // exists to catch. Sampling after costs one serialized round trip (~100 ms)
+        // and makes any concurrent insert force the flag closed.
         let total = try await totalCount()
-        let page = try await leadPage
         return Self.compose(
             leads: page.rows, totalCount: total, leadsComplete: page.complete,
             deep: await deep, personalized: await personalized, replied: await replied,
@@ -66,9 +72,19 @@ struct LeadsRepository {
         if !deep.ok || !personalized.ok { degraded.append("personalization lanes") }
         if !replied.ok { degraded.append("replies") }
         if !messaged.ok { degraded.append("outreach history") }
+        // An EMPTY book is not a state this database reaches — and under anon+RLS a
+        // revoked or missing SELECT policy returns HTTP 200 with `[]`, not an error.
+        // Every guard here would read that as a genuine empty table: `0 >= 0` even
+        // satisfies the completeness test, so a grant blackout rendered as a clean,
+        // complete, freshly-stamped dashboard showing 0 scraped / 0 emailed /
+        // 0 replies. This project has already had one anon-permission lockdown.
+        // Fail CLOSED and name the cause.
+        if leads.isEmpty || totalCount == 0 {
+            degraded.append("lead table unreadable (check anon RLS)")
+        }
         return DashboardInputs(
             leads: leads, totalCount: totalCount,
-            leadsComplete: leadsComplete && distinct >= totalCount,
+            leadsComplete: leadsComplete && distinct >= totalCount && !leads.isEmpty,
             deepLaneLeadIDs: deep.ids,
             personalizedLeadIDs: personalized.ids,
             repliedLeadIDs: replied.ids,
@@ -154,7 +170,7 @@ struct LeadsRepository {
     func recentLeads(limit: Int = 1000) async throws -> [LeadRow] {
         let data = try await client.get("leads", [
             URLQueryItem(name: "select", value: Self.leadColumns),
-            URLQueryItem(name: "order", value: "created_at.desc"),
+            URLQueryItem(name: "order", value: "created_at.desc.nullslast,id.desc"),
             URLQueryItem(name: "limit", value: String(max(1, limit))),
         ])
         return try JSONDecoder().decode([LeadRow].self, from: data)
@@ -235,7 +251,7 @@ struct LeadsRepository {
         let data = try await client.get("leads", [
             URLQueryItem(name: "select", value: Self.leadColumns + ",last_name,email"),
             URLQueryItem(name: "or", value: Self.searchFilter(term)),
-            URLQueryItem(name: "order", value: "created_at.desc,id.desc"),
+            URLQueryItem(name: "order", value: "created_at.desc.nullslast,id.desc"),
             URLQueryItem(name: "limit", value: String(max(1, limit))),
         ])
         return try JSONDecoder().decode([LeadRow].self, from: data)
@@ -297,9 +313,8 @@ struct LeadsRepository {
                 cursor = next
             }
             return (ids, false)   // page cap hit → the set is a floor, not the truth
-        } catch is CancellationError {
-            return (ids, false)
         } catch {
+            if isCancellation(error) { return (ids, false) }
             NSLog("LeadsRepository: \(table).lead_id read failed (\(error.localizedDescription)); treating as empty+partial")
             return (ids, false)
         }
@@ -319,16 +334,17 @@ struct LeadsRepository {
             let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if !id.isEmpty { ids.insert(id) }
         }
-        let cursor = (rows.last?["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (ids, rows.count, cursor?.isEmpty == false ? cursor : nil)
+        return (ids, rows.count, Self.cursor(from: rows.last))
     }
 
     /// SENT emails over the last `weeks` weeks (`send_queue`, `status=sent`), each
     /// carrying its `lead_id` so the trend can count DISTINCT leads messaged per
     /// week rather than send steps — and so it can be narrowed to a filtered lead
-    /// set. Newest first and PAGED: a single 1000-row read clips the oldest weeks of
-    /// the window as soon as the send log passes 1000 rows in 13 weeks.
-    /// Supplementary → fails open to whatever was read. NOTE: the cutoff is emitted
+    /// set. PAGED because a single 1000-row read stops covering the window as soon
+    /// as the send log passes 1000 rows in 13 weeks; keyset-ordered by `id` (a
+    /// random uuid), so a partial walk under-counts UNIFORMLY across the window
+    /// rather than truncating the oldest weeks. Supplementary → fails open to
+    /// whatever was read, with `ok` telling the caller which it was. NOTE: the cutoff is emitted
     /// by a plain `ISO8601DateFormatter` (default GMT, `…Z` suffix, no `+`), which
     /// `URLComponents` passes through unmangled — do not switch it to a `+00:00`
     /// form or the `gte` filter breaks.
@@ -363,28 +379,58 @@ struct LeadsRepository {
                 ]
                 if let cursor { items.append(URLQueryItem(name: "id", value: "gt.\(cursor)")) }
                 let data = try await client.get("send_queue", items)
-                guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                guard let page = Self.sentEvents(data) else {
                     NSLog("LeadsRepository: send_queue page unparseable; messaged trend degraded")
                     return (events, false)
                 }
-                if rows.isEmpty { return (events, true) }
-                events.append(contentsOf: rows.compactMap { row in
-                    guard let lead = row["lead_id"] as? String,
-                          let sent = row["sent_at"] as? String else { return nil }
-                    return DashboardInputs.SentEvent(leadID: lead, sentAt: sent)
-                })
-                guard let next = (rows.last?["id"] as? String)?.nilIfEmpty else {
-                    return (events, false)
-                }
+                if page.rows == 0 { return (events, true) }
+                events.append(contentsOf: page.events)
+                // A non-empty page with no usable cursor cannot be walked past —
+                // report degraded rather than silently returning a prefix.
+                guard let next = page.cursor else { return (events, false) }
                 cursor = next
             }
             return (events, false)   // page cap hit → a floor, not the whole window
-        } catch is CancellationError {
-            return (events, false)
         } catch {
+            if isCancellation(error) { return (events, false) }
             NSLog("LeadsRepository: send_queue read failed (\(error.localizedDescription)); messaged trend degraded")
             return (events, false)
         }
+    }
+
+    /// Pure parse of one `select=id,lead_id,sent_at` page (selftest target). nil =
+    /// the body wasn't the expected JSON array, i.e. a FAILED read.
+    ///
+    /// This seam exists because the CRITICAL bug it guards — a failed send_queue
+    /// read rendering as "nobody was ever emailed" — was fixed in the consumer and
+    /// left UNPINNED in the producer: a mutation flipping this page's failure return
+    /// to `ok: true` survived the whole suite, because the suite only ever handed
+    /// `compose` a tuple it built itself.
+    static func sentEvents(_ data: Data)
+        -> (events: [DashboardInputs.SentEvent], rows: Int, cursor: String?)? {
+        guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        let events = rows.compactMap { row -> DashboardInputs.SentEvent? in
+            guard let lead = row["lead_id"] as? String,
+                  let sent = row["sent_at"] as? String else { return nil }
+            return DashboardInputs.SentEvent(leadID: lead, sentAt: sent)
+        }
+        return (events, rows.count, Self.cursor(from: rows.last))
+    }
+
+    /// The keyset cursor for a page: the LAST row's own `id`.
+    ///
+    /// Accepts a number as well as a string. Every table this walks has a uuid PK
+    /// today, but the walk functions are generic over `table`, and a `bigserial` id
+    /// would decode as a number — the cast would yield nil, the walk would stop after
+    /// one page, and the only symptom would be a permanent red chip with nothing
+    /// naming the cause.
+    static func cursor(from row: [String: Any]?) -> String? {
+        guard let raw = row?["id"] else { return nil }
+        if let s = (raw as? String)?.nilIfEmpty { return s }
+        if let n = raw as? NSNumber { return n.stringValue }
+        return nil
     }
 
     /// The four pipeline stages the enrichment layer writes (the DB's forward-only
@@ -415,22 +461,30 @@ struct LeadsRepository {
                               maxPages: Int = 20) async -> (counts: [String: Int], ok: Bool) {
         do {
             var counts: [String: Int] = [:]
-            var offset = 0
+            var cursor: String? = nil
             for _ in 0..<maxPages {
-                let data = try await client.get(table, [
-                    URLQueryItem(name: "select", value: column),
-                    URLQueryItem(name: "order", value: "id"),
+                try Task.checkCancellation()
+                // KEYSET, like every other walk in this file. This was the last
+                // OFFSET pager left standing, over a table the pipeline appends to
+                // continuously — the same duplicate/skip hazard documented at
+                // `allLeads`, in the one place nobody converted, and therefore the
+                // one a future reader would copy.
+                var items = [
+                    URLQueryItem(name: "select", value: "id,\(column)"),
+                    URLQueryItem(name: "order", value: "id.asc"),
                     URLQueryItem(name: "limit", value: "1000"),
-                    URLQueryItem(name: "offset", value: String(offset)),
-                ])
+                ]
+                if let cursor { items.append(URLQueryItem(name: "id", value: "gt.\(cursor)")) }
+                let data = try await client.get(table, items)
                 guard let page = Self.tally(data, column: column) else {
                     // 2xx but unparseable body = degraded read, NOT "empty & complete".
-                    NSLog("LeadsRepository: \(table).\(column) page at offset \(offset) unparseable; marking partial")
+                    NSLog("LeadsRepository: \(table).\(column) page unparseable; marking partial")
                     return (counts, false)
                 }
                 if page.rows == 0 { return (counts, true) }
                 counts.merge(page.counts) { $0 + $1 }
-                offset += page.rows
+                guard let next = page.cursor else { return (counts, false) }
+                cursor = next
             }
             // Page cap hit without an empty page: counts are a floor — mark partial.
             return (counts, false)
@@ -443,7 +497,8 @@ struct LeadsRepository {
     /// Pure tally of one PostgREST page (selftest target). Returns nil when the
     /// body isn't the expected JSON array — the caller must treat that as a FAILED
     /// read, never as an empty page.
-    static func tally(_ data: Data, column: String) -> (counts: [String: Int], rows: Int)? {
+    static func tally(_ data: Data, column: String)
+        -> (counts: [String: Int], rows: Int, cursor: String?)? {
         guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
             return nil
         }
@@ -454,7 +509,7 @@ struct LeadsRepository {
             if label.isEmpty { continue }
             counts[label, default: 0] += 1
         }
-        return (counts, rows.count)
+        return (counts, rows.count, Self.cursor(from: rows.last))
     }
 
     /// Lightweight connectivity probe: fetch a single id. Used by `--check-supabase`.

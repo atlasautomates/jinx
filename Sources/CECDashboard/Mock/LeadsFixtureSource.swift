@@ -88,12 +88,17 @@ enum LeadsFixtureSource {
 
     /// Offline stand-in for the server search: the same `ilike *term*` semantics
     /// over the fixture book, so the results panel can be driven without network.
+    ///
+    /// Mirrors the live query's ORDER and LIMIT too, not just its matching — without
+    /// them, `--fixture` could never reach the result cap or the "(60+)" suffix,
+    /// which are the two behaviours in this panel most likely to be wrong.
     static func search(_ rawTerm: String, in leads: [LeadRow]) -> [LeadRow] {
         guard let term = LeadsRepository.searchTerm(rawTerm)?.lowercased() else { return [] }
-        return leads.filter { row in
-            [row.companyName, row.firstName, row.lastName, row.email]
+        let hits = leads.filter { row in
+            [row.companyName, row.fullNameForSearch, row.firstName, row.lastName, row.email]
                 .compactMap { $0?.lowercased() }
                 .contains { $0.contains(term) }
         }
+        return Array(LeadsRepository.newestFirst(hits).prefix(LeadsRepository.searchResultLimit))
     }
 }

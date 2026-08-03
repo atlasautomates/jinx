@@ -16,8 +16,6 @@ struct RootView: View {
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
-    /// When the Leads data on screen was loaded — rendered as "as of HH:mm".
-    @State private var loadedAt: Date? = nil
 
     var body: some View {
         TabView {
@@ -63,7 +61,6 @@ struct RootView: View {
             // Never leave a fixture book behind a live snapshot: search would keep
             // answering from synthetic rows while the tab showed real ones.
             searchModel.fixtureRows = nil
-            loadedAt = Date()
             await model.load()
         }
     }
@@ -92,9 +89,16 @@ struct RootView: View {
         }
     }
 
+    /// Wake/activation refresh, throttled.
+    ///
+    /// `didBecomeActive` fires on every Cmd-Tab back into the window, and each
+    /// refresh is a full book walk (~14 PostgREST round trips today, ~47 at 10x).
+    /// The in-flight guard prevents overlap, not repetition — so this adds the
+    /// missing floor. The manual Refresh button deliberately bypasses it.
     @MainActor
-    private func reloadLeads() async {
-        loadedAt = Date()
+    private func reloadLeads(minInterval: TimeInterval = 60) async {
+        if let loadedAt = model.loadedAt,
+           Date().timeIntervalSince(loadedAt) < minInterval { return }
         await model.load()
     }
 
@@ -155,9 +159,30 @@ struct RootView: View {
         if let data = model.state.value {
             liveLeads(data, staleMessage: model.state.staleMessage)
         } else if case .failed(let message) = model.state {
-            ABErrorView(message: message, onRetry: { retryLeads() })
+            // Search still works when the SNAPSHOT read fails — it is an independent
+            // server query, and "find the lead I know exists" is exactly what you
+            // want when the dashboard itself is broken. Previously the box lived
+            // inside the loaded arm, so the one working feature disappeared with the
+            // failure (and ⌘F went disabled with it).
+            leadsFailed(message: message)
         } else {
             ABLoadingView()
+        }
+    }
+
+    /// Failure state that keeps the search surface alive.
+    private func leadsFailed(message: String) -> some View {
+        VStack(spacing: 0) {
+            ABSearchOnlyHeader(
+                query: Bindable(searchModel).query,
+                state: searchModel.state,
+                onSubmit: { searchModel.submit() },
+                onClear: { searchModel.clear() },
+                onSelectLead: LeadsFixtureSource.isRequested ? nil : { lead in
+                    guard let id = lead.leadID else { return }
+                    profilePresenter.active = LeadRef(id: id, companyName: lead.company, email: nil)
+                })
+            ABErrorView(message: message, onRetry: { retryLeads() })
         }
     }
 
@@ -168,7 +193,13 @@ struct RootView: View {
         let fixture = LeadsFixtureSource.isRequested
         return ABLeadsView(
             data: data,
-            onSelectLead: { lead in
+            // Fixture rows are inert. The profile sheet builds its OWN live client
+            // (LeadProfileModel.load → SupabaseClient.make), so a synthetic row could
+            // raise a Keychain prompt and then render a real lead's dossier beside
+            // invented ones — in the mode whose whole claim is "no Keychain, no
+            // network". Every other fixture guard lives in this file; this seam was
+            // the one that had none.
+            onSelectLead: fixture ? nil : { lead in
                 guard let id = lead.leadID else { return }
                 profilePresenter.active = LeadRef(id: id, companyName: lead.company, email: nil)
             },
@@ -179,7 +210,7 @@ struct RootView: View {
             isRefreshing: model.isRefreshing,
             staleMessage: staleMessage,
             fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
-            loadedAt: fixture ? nil : loadedAt,
+            loadedAt: fixture ? nil : model.loadedAt,
             onFilterChange: { model.apply($0) },
             searchQuery: Bindable(searchModel).query,
             searchState: searchModel.state,
@@ -249,6 +280,16 @@ struct RootView: View {
     // with their window. Revisit as a `Window` scene if it ever matters.
     @ViewBuilder
     private var pipelineTab: some View {
+        if LeadsFixtureSource.isRequested {
+            ABErrorView(message: "Offline fixture mode — this tab needs live credentials.",
+                        onRetry: nil)
+        } else {
+            pipelineLive
+        }
+    }
+
+    @ViewBuilder
+    private var pipelineLive: some View {
         VSplitView {
             pipelineDashboard
                 .frame(minHeight: 220)

@@ -99,6 +99,45 @@ extension FocusedValues {
     }
 }
 
+/// Search on its own, above the full-tab error state. The snapshot read failing
+/// says nothing about whether a lead can be looked up — and that is precisely when
+/// someone wants to.
+struct ABSearchOnlyHeader: View {
+    @Binding var query: String
+    let state: LeadSearchModel.SearchState
+    let onSubmit: () -> Void
+    let onClear: () -> Void
+    var onSelectLead: ((ABLeadsData.Lead) -> Void)? = nil
+
+    private var showingResults: Bool {
+        if case .idle = state { return false }
+        return true
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignTokens.space3) {
+            HStack(alignment: .center, spacing: DesignTokens.space4) {
+                Text("Leads")
+                    .font(.adventor(DesignTokens.textXl, bold: true))
+                    .foregroundStyle(DesignTokens.textPrimary)
+                ABSearchField(query: $query,
+                              isSearching: state.isSearching,
+                              hasResults: showingResults,
+                              onSubmit: onSubmit,
+                              onClear: onClear)
+                Spacer(minLength: 0)
+            }
+            if showingResults {
+                ABSearchResultsPanel(state: state, onSelect: onSelectLead, onClear: onClear)
+                    .frame(maxHeight: 420)
+            }
+        }
+        .padding(.horizontal, DesignTokens.space6)
+        .padding(.top, DesignTokens.space5)
+        .background(DesignTokens.bgRoot)
+    }
+}
+
 /// The hit list. Replaces the recent-leads panel while a search is on screen, so
 /// the tab never shows two competing lists — and states plainly that it is showing
 /// search results over the WHOLE book, not the filtered view underneath.

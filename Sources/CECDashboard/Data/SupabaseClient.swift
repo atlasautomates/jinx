@@ -1,5 +1,21 @@
 import Foundation
 
+/// Was this error a cancellation rather than a failure?
+///
+/// One definition, four call sites. URLSession surfaces task cancellation as a
+/// wrapped `URLError.cancelled`, NOT as `CancellationError` — a fact this codebase
+/// had already learned once (`LeadProfileModel.load`) and then re-lost in newer
+/// code that guarded on `CancellationError` alone. Getting it wrong is not cosmetic
+/// here: a cancelled lane read returns `ok: false`, which disables the Lane filter
+/// and paints a red degraded chip because a window closed.
+///
+/// `Task.isCancelled` is checked too, since the erasure can happen either way.
+func isCancellation(_ error: Error) -> Bool {
+    if error is CancellationError { return true }
+    if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+    return Task.isCancelled
+}
+
 /// Thin, read-only PostgREST client over URLSession (no third-party dependency).
 /// Only issues GETs — the dashboard never writes.
 struct SupabaseClient {
@@ -98,15 +114,15 @@ struct SupabaseClient {
             return data
         } catch let error as ClientError {
             throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .cancelled {
+        } catch {
             // Cancellation is not a transport failure. Erasing it into one made a
             // closed window write "Network error: cancelled" into a stale banner,
             // and made a cancelled paged walk report itself as a DEGRADED read —
-            // which then hid the Lane menu on the way out.
-            throw CancellationError()
-        } catch {
+            // which then hid the Lane menu on the way out. Only OUR cancellation is
+            // erased (isCancellation checks Task.isCancelled), so a stray
+            // URLError.cancelled from somewhere else still surfaces as an error
+            // rather than leaving the first load spinning forever.
+            if isCancellation(error) { throw CancellationError() }
             throw ClientError.transport(error.localizedDescription)
         }
     }
@@ -128,15 +144,15 @@ struct SupabaseClient {
             return n
         } catch let error as ClientError {
             throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .cancelled {
+        } catch {
             // Cancellation is not a transport failure. Erasing it into one made a
             // closed window write "Network error: cancelled" into a stale banner,
             // and made a cancelled paged walk report itself as a DEGRADED read —
-            // which then hid the Lane menu on the way out.
-            throw CancellationError()
-        } catch {
+            // which then hid the Lane menu on the way out. Only OUR cancellation is
+            // erased (isCancellation checks Task.isCancelled), so a stray
+            // URLError.cancelled from somewhere else still surfaces as an error
+            // rather than leaving the first load spinning forever.
+            if isCancellation(error) { throw CancellationError() }
             throw ClientError.transport(error.localizedDescription)
         }
     }

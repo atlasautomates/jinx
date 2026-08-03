@@ -109,9 +109,14 @@ struct ABLeadsView: View {
                                  onSelect: onSelectLead,
                                  onClear: onSearchClear ?? {})
         } else {
+            // effectiveFilter, NOT filter: this caption STATES what the rows are.
+            // Reading the requested filter here titled the panel "Filtered leads ·
+            // Deep lane" over the entire unfiltered book whenever a lane read failed
+            // and the dimension was suppressed. The bar edits `filter`; every surface
+            // that makes a claim about the rows reads `effectiveFilter`.
             ABRecentLeadsTable(leads: data.recentLeads,
                                matchingCount: data.matchingCount,
-                               filterSummary: data.filter.summary,
+                               filterSummary: data.effectiveFilter.summary,
                                forcedHoverIndex: interactionDemo ? 1 : nil,
                                staticRender: staticRender,
                                onSelect: onSelectLead)

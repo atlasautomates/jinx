@@ -48,7 +48,10 @@ final class LeadSearchModel {
     /// rather than searching, so ⌫⌫⏎ puts the tab back the way it was.
     func submit(client: @escaping () throws -> SupabaseClient = { try SupabaseClient.make() }) {
         guard let term = LeadsRepository.searchTerm(query) else {
-            clear()
+            // Dismiss the RESULTS, keep the text. Routing this to `clear()` deleted
+            // what the user had typed: backspacing to one character and pressing
+            // Enter wiped the box.
+            dismissResults()
             return
         }
         inFlight?.cancel()
@@ -88,9 +91,14 @@ final class LeadSearchModel {
 
     /// Drop the results and the query — the tab returns to its filtered view.
     func clear() {
+        dismissResults()
+        query = ""
+    }
+
+    /// Drop the results but keep what the user typed.
+    func dismissResults() {
         inFlight?.cancel()
         inFlight = nil
-        query = ""
         state = .idle
     }
 

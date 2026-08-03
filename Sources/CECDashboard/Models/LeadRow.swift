@@ -24,6 +24,14 @@ struct LeadRow: Codable, Identifiable, Sendable {
     var lastName: String? = nil
     var email: String? = nil
 
+    /// `full_name` is one of the columns the live search matches, but the dashboard
+    /// never selects it — this composes the same thing from the parts it does have,
+    /// so the offline search covers the same columns as the query it stands in for.
+    var fullNameForSearch: String? {
+        let parts = [firstName, lastName].compactMap { $0?.nilIfEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case companyName = "company_name"

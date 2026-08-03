@@ -9,9 +9,14 @@ import SwiftUI
 
 struct ABFilterBar: View {
     let data: ABLeadsData
-    /// True while search results own the list column. The pills then read as
-    /// inactive: search deliberately ignores filters, so a lit teal pill would be
-    /// asserting a scope over rows it does not govern.
+    /// True while search results own the list column.
+    ///
+    /// The pills stay LIT. An earlier cut dimmed them here on the grounds that a lit
+    /// pill would assert a scope over rows it doesn't govern — but search replaces
+    /// only the list; the heroes, both trends and all four breakdowns below are still
+    /// filtered. Dimming told the user the lens was off while most of the screen was
+    /// still under it. The disclaimer belongs on the panel that actually ignores the
+    /// filters, and it lives there ("whole lead book · filters not applied").
     var searching: Bool = false
     /// Called with the new filter whenever a menu changes. The view model owns the
     /// value — this view never mutates it locally, so what the bar draws and what
@@ -28,7 +33,9 @@ struct ABFilterBar: View {
         HStack(spacing: DesignTokens.space2) {
             Image(systemName: "line.3.horizontal.decrease")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(filter.isActive ? DesignTokens.accent : DesignTokens.textGhost)
+                // The icon asserts "a lens is applied", so it tracks the EFFECTIVE
+                // filter — a suppressed dimension must not light it.
+                .foregroundStyle(data.effectiveFilter.isActive ? DesignTokens.accent : DesignTokens.textGhost)
 
             if data.laneFilterAvailable {
                 // Keyed on `rawValue`, not on the display label: routing a selection
@@ -38,8 +45,7 @@ struct ABFilterBar: View {
                     title: "Lane", selection: filter.lane?.rawValue,
                     display: { LeadFilter.Lane(rawValue: $0)?.label ?? $0 },
                     options: data.facets.lanes.map { .init(value: $0.lane.rawValue, count: $0.count) },
-                    dimmed: searching,
-                    onPick: { picked in
+                                        onPick: { picked in
                         var next = filter
                         next.lane = picked.flatMap(LeadFilter.Lane.init(rawValue:))
                         onChange(next)
@@ -51,23 +57,20 @@ struct ABFilterBar: View {
             }
 
             ABFilterMenu(title: "Region", selection: filter.region, options: data.facets.regions,
-                         dimmed: searching,
-                         onPick: { picked in
+                                                  onPick: { picked in
                              var next = filter; next.region = picked; onChange(next)
                          })
             ABFilterMenu(title: "Source", selection: filter.source, options: data.facets.sources,
-                         dimmed: searching,
-                         onPick: { picked in
+                                                  onPick: { picked in
                              var next = filter; next.source = picked; onChange(next)
                          })
             ABFilterMenu(title: "Industry", selection: filter.industry, options: data.facets.industries,
-                         dimmed: searching,
-                         onPick: { picked in
+                                                  onPick: { picked in
                              var next = filter; next.industry = picked; onChange(next)
                          })
 
-            if filter.isActive {
-                ABClearFiltersButton(count: data.matchingCount, dimmed: searching) { onChange(.all) }
+            if data.effectiveFilter.isActive {
+                ABClearFiltersButton(count: data.matchingCount) { onChange(.all) }
             }
 
             Spacer(minLength: 0)
@@ -94,13 +97,11 @@ private struct ABFilterMenu: View {
     /// lane menu stores `rawValue` and displays a human label).
     var display: (String) -> String = { $0 }
     let options: [FilterFacets.Option]
-    /// Draw as inactive even when set — search results don't obey these.
-    var dimmed: Bool = false
     let onPick: (String?) -> Void
     @State private var hovering = false
     @Environment(\.isStaticRender) private var isStaticRender
 
-    private var active: Bool { selection != nil && !dimmed }
+    private var active: Bool { selection != nil }
 
     var body: some View {
         // `Menu` is AppKit-backed: ImageRenderer paints a yellow placeholder over
@@ -218,7 +219,6 @@ private struct ABUnavailableChip: View {
 /// Clears every dimension at once, and states what the current lens is showing.
 private struct ABClearFiltersButton: View {
     let count: Int
-    var dimmed: Bool = false
     let action: () -> Void
     @State private var hovering = false
 
@@ -227,7 +227,7 @@ private struct ABClearFiltersButton: View {
             HStack(spacing: DesignTokens.space1) {
                 Text(count, format: .number)
                     .font(.abMono(DesignTokens.textXs, weight: .semibold))
-                    .foregroundStyle(dimmed ? DesignTokens.textMuted : DesignTokens.accent)
+                    .foregroundStyle(DesignTokens.accent)
                 Text(count == 1 ? "lead" : "leads")
                     .font(.adventor(DesignTokens.textXs))
                     .foregroundStyle(DesignTokens.textMuted)

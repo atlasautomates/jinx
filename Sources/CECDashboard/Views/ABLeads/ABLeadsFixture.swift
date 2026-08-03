@@ -161,30 +161,21 @@ struct ABLeadsData: Sendable {
         return d
     }()
 
-    /// Frozen "filter applied" variant for the preview harness — the same fixture
-    /// narrowed to one lane + one region, so a still can show the filter bar in its
-    /// active state and the hero numbers moving with it (bible §9).
+    /// Frozen "filter applied" variant for the preview harness — a still showing the
+    /// filter bar active and every number moving with it (bible §9).
+    ///
+    /// DERIVED, not hand-listed. The hand-assembled version shipped a still reading
+    /// "0 leads reached" underneath a full 12-week messaged curve, because a field
+    /// added later defaulted to zero in a memberwise init nobody updated — in the one
+    /// preview whose entire job is demonstrating that the numbers are consistent.
+    /// Running the real derivation makes that class of drift unrepresentable: a new
+    /// derived field is computed here the same way it is computed in production.
     static let abFiltered: ABLeadsData = {
-        var d = ABLeadsData(
-            totals: .init(scraped: 296, emailed: 214, replies: 31),
-            emailedOfScrapedPct: 72.3,
-            repliesOfEmailedPct: 14.5,
-            leadsAddedWeekly: .init(weeks: ab.leadsAddedWeekly.weeks,
-                                    values: [8, 11, 14, 12, 17, 21, 15, 18, 24, 27, 21, 25]),
-            leadsMessagedWeekly: .init(weeks: ab.leadsMessagedWeekly.weeks,
-                                       values: [5, 7, 9, 8, 13, 14, 11, 13, 18, 20, 16, 19]),
-            bySource: [.init(label: "Sales Navigator", count: 171), .init(label: "Google Maps", count: 125)],
-            byIndustry: [.init(label: "Residential Solar", count: 141), .init(label: "Assisted Living", count: 96),
-                         .init(label: "Credit Unions", count: 59)],
-            byStatus: [.init(label: "Campaigned", count: 214), .init(label: "Personalized", count: 46),
-                       .init(label: "Scraped", count: 36)],
-            recentLeads: Array(ab.recentLeads.filter { $0.location.hasSuffix("CA") }),
-            byRegion: [.init(label: "California", count: 296)],
-            filter: LeadFilter(lane: .standard, region: "California"),
-            facets: ab.facets,
-            matchingCount: 296)
-        d.emailedDenominator = 296
-        return d
+        // Fixed clock → the still is byte-deterministic across runs.
+        let now = DateParse.iso("2026-07-24T12:00:00+00:00") ?? Date()
+        return ABLeadsData(inputs: LeadsFixtureSource.inputs(now: now),
+                           filter: LeadFilter(lane: .standard, region: "California"),
+                           now: now)
     }()
 }
 

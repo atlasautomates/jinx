@@ -19,6 +19,16 @@ final class DashboardViewModel {
     /// The active lens. Set through `apply(_:)` so the derived view can never lag
     /// behind the filter the bar is drawing.
     private(set) var filter: LeadFilter = .all
+    /// When the data currently on screen was fetched.
+    ///
+    /// Owned HERE, and written only on the success path, because the header stamp
+    /// exists solely to state the data's age. Set from the call sites it was wrong
+    /// twice over: two of the five refresh drivers wrote it (the manual Refresh
+    /// button and the 10-minute poll did not), and they wrote it BEFORE awaiting the
+    /// fetch — so a refresh that was deduped, cancelled or failed still advanced the
+    /// clock over unchanged data. That is precisely the lie the stamp was added to
+    /// prevent.
+    private(set) var loadedAt: Date? = nil
 
     /// The last successful fetch, with its per-lead facets already derived, so a
     /// filter change is a local re-tally rather than a re-derivation (which cost
@@ -32,6 +42,7 @@ final class DashboardViewModel {
     func loadFixture() {
         let snap = LeadSnapshot(LeadsFixtureSource.inputs())
         snapshot = snap
+        loadedAt = Date()
         state = .loaded(ABLeadsData(snapshot: snap, filter: filter))
     }
 
@@ -57,6 +68,7 @@ final class DashboardViewModel {
             let inputs = try await Self.fetchInputs()
             let snap = LeadSnapshot(inputs)
             snapshot = snap
+            loadedAt = Date()          // success only — see the property's note
             state = .loaded(ABLeadsData(snapshot: snap, filter: filter))
         } catch is CancellationError {
             // The window is going away (or a newer load superseded us). Writing a

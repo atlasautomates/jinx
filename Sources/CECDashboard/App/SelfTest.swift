@@ -365,6 +365,223 @@ enum SelfTest {
         problems.append(contentsOf: leadFilterChecks())
         problems.append(contentsOf: regionKeyChecks())
         problems.append(contentsOf: leadSearchChecks())
+        problems.append(contentsOf: viewModelChecks())
+        problems.append(contentsOf: walkChecks())
+        problems.append(contentsOf: frozenFixtureChecks())
+        return problems
+    }
+
+    /// The two state machines this feature added had ZERO coverage — every other
+    /// check here exercises pure derivation. These drive the real view models.
+    private static func viewModelChecks() -> [String] {
+        var problems: [String] = []
+
+        // The freshness stamp must describe the DATA, not the attempt. It was
+        // written by two of five refresh drivers, before the await, regardless of
+        // outcome — so a deduped, cancelled or failed refresh advanced the clock
+        // over unchanged numbers, which is the exact lie it was added to prevent.
+        let vm = DashboardViewModel()
+        if vm.loadedAt != nil { problems.append("vm: no load yet → no timestamp") }
+        vm.loadFixture()
+        guard let firstStamp = vm.loadedAt else {
+            problems.append("vm: a successful load must stamp loadedAt")
+            return problems
+        }
+        // A filter change re-derives; it does NOT make the data any newer.
+        vm.apply(LeadFilter(source: "sales-nav"))
+        if vm.loadedAt != firstStamp {
+            problems.append("vm: a filter change must not advance the freshness stamp")
+        }
+        if vm.state.value?.filter.source != "sales-nav" {
+            problems.append("vm: apply() must re-derive through the new filter")
+        }
+        if vm.state.value?.matchingCount == vm.state.value.map({ _ in 0 }) {
+            problems.append("vm: filtered snapshot should still match some leads")
+        }
+
+        // Search: a term below the minimum dismisses the RESULTS and keeps the text.
+        let search = LeadSearchModel()
+        search.fixtureRows = vm.snapshotLeads
+        search.query = "Harborline"
+        search.submit()
+        guard case .results(_, let hits) = search.state, !hits.isEmpty else {
+            problems.append("search-vm: an offline search over the fixture book must return hits")
+            return problems
+        }
+        // The offline path must obey the same cap and order as the live query, or
+        // `--fixture` can never exercise the "(60+)" surface or the newest-first
+        // ordering — the two behaviours in that panel most likely to be wrong.
+        // Asserted over a set deliberately LARGER than the cap: the fixture book
+        // happens to yield exactly 60 per prefix, which would make this blind.
+        let overCap = (0..<(LeadsRepository.searchResultLimit + 12)).map { i in
+            LeadRow(id: "s\(i)", companyName: "Capco \(i)", firstName: nil, industry: nil,
+                    leadSource: nil, city: nil, state: nil,
+                    createdAt: String(format: "2026-07-%02dT00:00:00+00:00", (i % 28) + 1))
+        }
+        let capped = LeadsFixtureSource.search("Capco", in: overCap)
+        if capped.count != LeadsRepository.searchResultLimit {
+            problems.append("search-vm: the offline search must honour searchResultLimit "
+                + "(got \(capped.count) of \(overCap.count))")
+        }
+        if capped.first?.createdAt ?? "" < capped.last?.createdAt ?? "" {
+            problems.append("search-vm: offline hits must be newest-first like the live query")
+        }
+        search.query = "H"
+        search.submit()
+        if search.query != "H" {
+            problems.append("search-vm: a too-short term must not delete what the user typed")
+        }
+        if case .idle = search.state {} else {
+            problems.append("search-vm: a too-short term must dismiss the results")
+        }
+        search.clear()
+        if !search.query.isEmpty { problems.append("search-vm: clear() empties the box") }
+        return problems
+    }
+
+    /// The paged WALKS, executed rather than reasoned about (see `StubURLProtocol`).
+    /// Everything here was previously "assumed": cursor advance, termination, the
+    /// page cap, dedupe, and whether a failed page actually reaches `ok: false`.
+    private static func walkChecks() -> [String] {
+        var problems: [String] = []
+
+        @Sendable func client(_ handler: @escaping @Sendable (URLRequest) -> StubURLProtocol.Response?) -> SupabaseClient {
+            SupabaseClient(baseURL: URL(string: "https://stub.invalid/rest/v1")!,
+                           apiKey: "stub", session: StubURLProtocol.session(handler))
+        }
+
+        /// Two pages then an empty one — the shape every walk expects.
+        @Sendable func pagedLeads(_ pages: [[String]]) -> @Sendable (URLRequest) -> StubURLProtocol.Response? {
+            let bodies = pages.map { "[" + $0.joined(separator: ",") + "]" } + ["[]"]
+            let counter = Counter()
+            return { req in
+                if req.value(forHTTPHeaderField: "Prefer") == "count=exact" {
+                    let total = pages.reduce(0) { $0 + $1.count }
+                    return .init(body: "[]", contentRange: "0-0/\(total)")
+                }
+                let i = counter.next()
+                return .init(body: i < bodies.count ? bodies[i] : "[]")
+            }
+        }
+
+        // A clean two-page walk: cursor advances by the LAST ROW's id, terminates on
+        // the empty page, and reports complete.
+        let repo = LeadsRepository(client: client(pagedLeads([[Self.leadJSON("a"), Self.leadJSON("b")],
+                                                              [Self.leadJSON("c")]])))
+        let walk = runAsync { try await repo.allLeads(pageSize: 2, maxPages: 5) }
+        switch walk {
+        case .failure(let error):
+            problems.append("walk: a clean two-page walk threw (\(error))")
+        case .success(let page):
+            if page.rows.map(\.id).sorted() != ["a", "b", "c"] {
+                problems.append("walk: expected every row across pages (got \(page.rows.map(\.id)))")
+            }
+            if !page.complete { problems.append("walk: a walk ending on an empty page is complete") }
+            // The cursor must be carried forward — without it the walk re-reads page 1.
+            let cursors = StubURLProtocol.queryValues("id").compactMap { $0 }
+            if cursors != ["gt.b", "gt.c"] {
+                problems.append("walk: cursor must advance by the last row's id (got \(cursors))")
+            }
+        }
+
+        // DUPLICATES: what an insert mid-walk produces. They must be dropped, and
+        // must NOT let the snapshot claim completeness (the row count would).
+        let dupRepo = LeadsRepository(client: client(pagedLeads([[Self.leadJSON("a"), Self.leadJSON("b")],
+                                                                 [Self.leadJSON("b"), Self.leadJSON("c")]])))
+        if case .success(let page) = runAsync({ try await dupRepo.allLeads(pageSize: 2, maxPages: 5) }) {
+            if page.rows.count != 3 {
+                problems.append("walk: a repeated row must be deduped (got \(page.rows.count))")
+            }
+        } else { problems.append("walk: dup walk threw") }
+
+        // PAGE CAP: a walk that never sees an empty page is NOT complete.
+        let capCounter = Counter()
+        let capRepo = LeadsRepository(client: client({ _ in
+            .init(body: "[" + Self.leadJSON("cap-\(capCounter.next())") + "]")
+        }))
+        if case .success(let page) = runAsync({ try await capRepo.allLeads(pageSize: 1, maxPages: 3) }) {
+            if page.complete { problems.append("walk: hitting the page cap must NOT read as complete") }
+            if page.rows.count != 3 { problems.append("walk: cap should stop after maxPages pages") }
+        } else { problems.append("walk: cap walk threw") }
+
+        // A FAILED page reaches `ok: false` — the producer half of the flat-zero
+        // trend. A mutation flipping this return survived the suite before the walk
+        // was executable.
+        let badRepo = LeadsRepository(client: client({ _ in .init(body: "not json") }))
+        let sends = runAsyncValue { await badRepo.messagedSendsResult(pageSize: 2, maxPages: 3) }
+        if sends?.ok != false {
+            problems.append("walk: an unparseable send_queue page must report ok:false")
+        }
+        let ids = runAsyncValue { await badRepo.leadIDsResult(table: "replies", filter: nil,
+                                                              pageSize: 2, maxPages: 3) }
+        if ids?.ok != false {
+            problems.append("walk: an unparseable lead_id page must report ok:false")
+        }
+        // An HTTP error is also a degraded read, not an empty one.
+        let errRepo = LeadsRepository(client: client({ _ in .init(status: 401, body: "{}") }))
+        let errIDs = runAsyncValue { await errRepo.leadIDsResult(table: "replies", filter: nil) }
+        if errIDs?.ok != false || errIDs?.ids.isEmpty != true {
+            problems.append("walk: a 401 must degrade, not return a confident empty set")
+        }
+        return problems
+    }
+
+    /// One stubbed `leads` row. Nonisolated so the stub's request handler — which
+    /// runs off the main actor — can build pages.
+    private nonisolated static func leadJSON(_ id: String,
+                                             created: String = "2026-07-20T00:00:00+00:00") -> String {
+        #"{"id":"\#(id)","company_name":"C\#(id)","created_at":"\#(created)","enrichment_stage":"scraped"}"#
+    }
+
+    /// Run an async throwing call to completion from the synchronous selftest.
+    private static func runAsync<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
+        let box = ResultBox<T>()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            do { box.value = .success(try await body()) } catch { box.value = .failure(error) }
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 20)
+        return box.value ?? .failure(CancellationError())
+    }
+
+    private static func runAsyncValue<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T? {
+        try? runAsync { await body() }.get()
+    }
+
+    private final class ResultBox<T>: @unchecked Sendable { var value: Result<T, Error>? }
+
+    /// Monotonic page index for the stub (no `Date`/random in selftests).
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var i = 0
+        func next() -> Int { lock.lock(); defer { i += 1; lock.unlock() }; return i }
+    }
+
+    /// Frozen preview fixtures are DATA, and data drifts: a field added to the
+    /// struct defaults to zero in any hand-listed fixture, and the still then ships
+    /// a figure that contradicts the chart above it (this shipped once — a messaged
+    /// curve footed by "0 leads reached").
+    private static func frozenFixtureChecks() -> [String] {
+        var problems: [String] = []
+        for (name, d) in [("ab", ABLeadsData.ab), ("abFiltered", ABLeadsData.abFiltered),
+                          ("abDegraded", ABLeadsData.abDegraded)] {
+            if d.leadsMessagedWeekly.values.reduce(0, +) > 0 && d.leadsMessagedTotal == 0 {
+                problems.append("fixture \(name): a non-zero messaged curve with a 0 distinct-lead "
+                    + "total — a derived field defaulted instead of being computed")
+            }
+            if d.matchingCount == 0 && !d.recentLeads.isEmpty {
+                problems.append("fixture \(name): rows rendered with matchingCount 0")
+            }
+            if d.emailedDenominator == 0 && d.totals.scraped > 0 {
+                problems.append("fixture \(name): hero denominator contradicts the header total")
+            }
+        }
+        // The filtered still must actually be filtered, or it demonstrates nothing.
+        if !ABLeadsData.abFiltered.effectiveFilter.isActive
+            || ABLeadsData.abFiltered.matchingCount == 0 {
+            problems.append("fixture abFiltered: must render a NARROWED, non-empty view")
+        }
         return problems
     }
 
@@ -898,6 +1115,44 @@ enum SelfTest {
             leads: [dupRow, dupRow, dupRow], totalCount: 3, leadsComplete: true)
         if duplicated.leadsComplete {
             problems.append("leads-compose: duplicated rows must NOT satisfy the completeness test")
+        }
+
+        // An RLS blackout returns 200 `[]`, not an error. Zero rows must therefore
+        // read as "unreadable", never as "complete and empty" — `0 >= 0` used to
+        // satisfy the completeness test and render a clean, freshly-stamped zero.
+        let blackout = LeadsRepository.compose(leads: [], totalCount: 0, leadsComplete: true)
+        if blackout.leadsComplete || !blackout.partial {
+            problems.append("leads-compose: an empty read must fail CLOSED (200 [] is what a "
+                + "revoked RLS policy returns), got complete=\(blackout.leadsComplete)")
+        }
+        if !blackout.degradedReads.contains(where: { $0.contains("unreadable") }) {
+            problems.append("leads-compose: an empty read must name itself (got \(blackout.degradedReads))")
+        }
+
+        // The send_queue page parser: the PRODUCER half of the flat-zero-trend
+        // CRITICAL. Pinning only `compose`'s handling of a hand-built `ok: false`
+        // left a mutation alive — flipping this page's failure return to `true`
+        // passed the entire suite.
+        if LeadsRepository.sentEvents(Data("not json".utf8)) != nil {
+            problems.append("sent-events: garbage body must be nil (failed page), not empty")
+        }
+        let sendPage = LeadsRepository.sentEvents(Data(
+            #"[{"id":"1","lead_id":"a","sent_at":"2026-07-20T00:00:00+00:00"},{"id":"2","lead_id":null,"sent_at":null}]"#.utf8))
+        if sendPage?.events.count != 1 || sendPage?.rows != 2 || sendPage?.cursor != "2" {
+            problems.append("sent-events: expected 1 event / 2 rows / cursor 2, got "
+                + "\(String(describing: sendPage.map { ($0.events.count, $0.rows, $0.cursor) }))")
+        }
+        if LeadsRepository.sentEvents(Data("[]".utf8))?.rows != 0 {
+            problems.append("sent-events: [] must parse as an empty page")
+        }
+        // The cursor accepts a numeric id too: these walks are generic over `table`,
+        // and a bigserial PK would otherwise stop the walk after one page with no
+        // diagnostic — reported as a degraded read forever.
+        if LeadsRepository.cursor(from: ["id": 42]) != "42" {
+            problems.append("cursor: a numeric id must be usable as a keyset cursor")
+        }
+        if LeadsRepository.cursor(from: ["id": ""]) != nil {
+            problems.append("cursor: a blank id must not be used as a cursor")
         }
 
         // A failed send_queue read must degrade, not render as a book nobody emailed.
