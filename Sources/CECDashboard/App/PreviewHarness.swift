@@ -21,6 +21,14 @@ enum PreviewRegistry {
         // interaction-demo variant: pressed hero card + hovered recent row +
         // hovered "Replied" status bar — proves hover/press states in a still.
         "leads-detail": { AnyView(ABLeadsView(data: .ab, interactionDemo: true, staticRender: true)) },
+        // Filter bar in its ACTIVE state: two dimensions set, and every figure on
+        // the tab computed from that narrowed set (the feature's whole claim).
+        "leads-filtered": { AnyView(ABLeadsView(data: .abFiltered, staticRender: true)) },
+        // Search results owning the list column, with the box carrying its term.
+        "leads-search":   { AnyView(ABLeadsView(
+            data: .ab, staticRender: true,
+            searchQuery: .constant("harbor"),
+            searchState: .results(term: "harbor", hits: Array(ABLeadsData.ab.recentLeads.prefix(3))))) },
         // Lead dossier at rest, then with the click-to-copy affordance forced:
         // Industry hovered (glyph + lifted surface), Email just copied.
         "profile":      { AnyView(LeadProfileFixture.view()) },

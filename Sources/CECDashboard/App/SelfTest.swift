@@ -214,16 +214,12 @@ enum SelfTest {
         }
     }
 
-    /// Exercises the live→ABLeads mapping (`ABLeadsData(inputs:)`): funnel math is
-    /// guarded (no NaN on zero denominators), the reskin carries the DB id needed to
-    /// open a profile, nil lead fields are tolerated, weekly series bucket correctly,
-    /// and empty/degraded inputs never crash. Pins the divisor-guard bug class.
-    private static func abLeadsMappingChecks() -> [String] {
-        var problems: [String] = []
+    /// Fixed clock so every now-anchored 12-week window below is deterministic.
+    private static let abNow = DateParse.iso("2026-07-24T12:00:00+00:00") ?? Date()
 
-        // Fixed clock so the now-anchored 12-week window is deterministic forever.
-        let now = DateParse.iso("2026-07-24T12:00:00+00:00") ?? Date()
-        let leads: [LeadRow] = [
+    /// The two-lead sample the mapping checks share.
+    private static var abSampleLeads: [LeadRow] {
+        [
             LeadRow(id: "a", companyName: "Acme", firstName: "Ada", industry: "Auto",
                     leadSource: "sales-nav", city: "Tampa", state: "FL",
                     createdAt: "2026-07-01T12:00:00+00:00", enrichmentStage: "campaigned"),
@@ -231,28 +227,46 @@ enum SelfTest {
                     leadSource: nil, city: nil, state: nil,
                     createdAt: "2026-07-08T12:00:00+00:00", enrichmentStage: "scraped"),
         ]
+    }
+
+    /// Exercises the live→ABLeads mapping (`ABLeadsData(inputs:filter:)`): funnel
+    /// math is guarded (no NaN on zero denominators), the reskin carries the DB id
+    /// needed to open a profile, nil lead fields are tolerated, weekly series bucket
+    /// correctly, and empty/degraded inputs never crash. Pins the divisor-guard bug
+    /// class.
+    private static func abLeadsMappingChecks() -> [String] {
+        var problems: [String] = []
+
+        let now = abNow
+        let leads = abSampleLeads
         // Lead "a" messaged TWICE in one week + lead "b" once → distinct-per-week = 2.
         let sends = [
             DashboardInputs.SentEvent(leadID: "a", sentAt: "2026-07-14T09:00:00+00:00"),
             DashboardInputs.SentEvent(leadID: "a", sentAt: "2026-07-15T09:00:00+00:00"),
             DashboardInputs.SentEvent(leadID: "b", sentAt: "2026-07-15T09:00:00+00:00"),
         ]
+        // A COMPLETE snapshot: the fetched leads ARE the table, so every figure is
+        // counted off them (and therefore moves with the filter).
         let inputs = DashboardInputs(
-            leads: leads, totalCount: 200,
-            statusCounts: ["campaigned": 80, "scraped": 120],
-            replyCount: 16, messagedSends: sends)
+            leads: leads, totalCount: 2, leadsComplete: true,
+            personalizedLeadIDs: ["a"], repliedLeadIDs: ["a", "ghost"],
+            messagedSends: sends)
         let d = ABLeadsData(inputs: inputs, now: now)
 
-        if d.totals.scraped != 200 { problems.append("abmap: scraped must be totalCount (got \(d.totals.scraped))") }
-        if d.totals.emailed != 80 { problems.append("abmap: emailed must be statusCounts[campaigned] (got \(d.totals.emailed))") }
-        if d.totals.replies != 16 { problems.append("abmap: replies must be replyCount/distinct replied leads (got \(d.totals.replies))") }
-        if abs(d.emailedOfScrapedPct - 40.0) > 0.001 { problems.append("abmap: emailedOfScrapedPct math (got \(d.emailedOfScrapedPct))") }
-        if abs(d.repliesOfEmailedPct - 20.0) > 0.001 { problems.append("abmap: repliesOfEmailedPct math (got \(d.repliesOfEmailedPct))") }
+        if d.totals.scraped != 2 { problems.append("abmap: scraped must count the matching leads (got \(d.totals.scraped))") }
+        if d.totals.emailed != 1 { problems.append("abmap: emailed must count campaigned leads (got \(d.totals.emailed))") }
+        // "ghost" replied but is not in the lead book — the ratio is replied LEADS
+        // over emailed LEADS, so a reply with no matching lead cannot inflate it.
+        if d.totals.replies != 1 {
+            problems.append("abmap: replies must intersect the shown leads, not count reply rows (got \(d.totals.replies))")
+        }
+        if abs(d.emailedOfScrapedPct - 50.0) > 0.001 { problems.append("abmap: emailedOfScrapedPct math (got \(d.emailedOfScrapedPct))") }
+        if abs(d.repliesOfEmailedPct - 100.0) > 0.001 { problems.append("abmap: repliesOfEmailedPct math (got \(d.repliesOfEmailedPct))") }
         if d.recentLeads.first?.leadID != "a" { problems.append("abmap: recent lead must carry the DB id for profile-open") }
         if d.recentLeads.count != 2 { problems.append("abmap: recentLeads count (got \(d.recentLeads.count))") }
         if d.recentLeads.last?.company != "Unknown" { problems.append("abmap: nil company_name must render as Unknown") }
         if d.recentLeads.first?.location != "Tampa, FL" { problems.append("abmap: location must join city/state") }
-        if d.recentLeads.last?.location != "—" { problems.append("abmap: nil city/state must render as em dash") }
+        if d.recentLeads.last?.location != "—" { problems.append("abmap: nil city/state/location must render as em dash") }
         if d.leadsAddedWeekly.values.reduce(0, +) != 2 { problems.append("abmap: added-weekly must total the leads") }
         // F3: distinct leads per week — lead "a" messaged twice in one week counts once.
         if d.leadsMessagedWeekly.values.reduce(0, +) != 2 {
@@ -266,20 +280,24 @@ enum SelfTest {
             problems.append("abmap: added/messaged trends must share an identical x-axis")
         }
         if d.leadsAddedWeekly.weeks.count != d.leadsAddedWeekly.values.count { problems.append("abmap: added-weekly weeks/values length mismatch") }
-        // F2: windowed breakdown discloses its scope (200 total > 2 fetched).
-        if d.breakdownScopeNote != "2 of 200" { problems.append("abmap: windowed breakdowns must carry a scope note (got \(d.breakdownScopeNote ?? "nil"))") }
+        // A complete snapshot presents no window, so it carries no scope note.
+        if d.breakdownScopeNote != nil { problems.append("abmap: a complete snapshot must not claim a window (got \(d.breakdownScopeNote ?? "nil"))") }
+        // The status panel counts the snapshot, so it moves with the filter.
+        if d.byStatus.map(\.label).sorted() != ["Campaigned", "Scraped"] {
+            problems.append("abmap: byStatus must roll up the shown leads (got \(d.byStatus.map(\.label)))")
+        }
         // F4: an out-of-window outlier timestamp must not shift/blank the axis.
         let outlier = ABLeadsData(inputs: DashboardInputs(
             leads: [LeadRow(id: "x", companyName: "Old", firstName: nil, industry: nil,
                             leadSource: nil, city: nil, state: nil,
                             createdAt: "2001-01-01T00:00:00+00:00", enrichmentStage: "scraped")],
-            totalCount: 1), now: now)
+            totalCount: 1, leadsComplete: true), now: now)
         if outlier.leadsAddedWeekly.weeks.count != 12 || outlier.leadsAddedWeekly.values.reduce(0, +) != 0 {
             problems.append("abmap: out-of-window timestamp must yield a zero-filled 12-week axis, not shift it")
         }
 
         // Divisor safety (the pinned bug class): all-zero / empty inputs — no NaN, no crash.
-        let empty = ABLeadsData(inputs: DashboardInputs(leads: [], totalCount: 0), now: now)
+        let empty = ABLeadsData(inputs: DashboardInputs(leads: [], totalCount: 0, leadsComplete: true), now: now)
         if empty.emailedOfScrapedPct != 0 || empty.repliesOfEmailedPct != 0 {
             problems.append("abmap: empty inputs must yield 0% ratios")
         }
@@ -291,46 +309,365 @@ enum SelfTest {
         if !empty.bySource.isEmpty || !empty.byStatus.isEmpty { problems.append("abmap: empty leads → empty breakdowns") }
         if empty.breakdownScopeNote != nil { problems.append("abmap: complete/empty data → no scope note") }
 
-        // F7: empty statusCounts → emailed windowed AND ratio denominator windowed to
-        // the same grain (1 campaigned of 2 fetched = 50%, not 1/200).
-        let windowed = ABLeadsData(inputs: DashboardInputs(leads: leads, totalCount: 200), now: now)
-        if windowed.totals.emailed != 1 {
-            problems.append("abmap: empty statusCounts → windowed campaigned count (got \(windowed.totals.emailed))")
+        // WINDOWED snapshot, nothing filtered: keep the exact full-table figures the
+        // HEAD reads give us rather than downgrading them to the window, and disclose
+        // the window (2 fetched of 200).
+        let windowedInputs = DashboardInputs(
+            leads: leads, totalCount: 200, leadsComplete: false,
+            statusCounts: ["campaigned": 80, "scraped": 120],
+            repliedLeadIDs: ["a", "z"], messagedSends: sends)
+        let windowed = ABLeadsData(inputs: windowedInputs, now: now)
+        if windowed.totals.scraped != 200 || windowed.totals.emailed != 80 || windowed.totals.replies != 2 {
+            problems.append("abmap: an unfiltered windowed load must keep the exact full-table figures "
+                + "(got \(windowed.totals.scraped)/\(windowed.totals.emailed)/\(windowed.totals.replies))")
         }
-        if windowed.emailedDenominator != 2 || abs(windowed.emailedOfScrapedPct - 50.0) > 0.001 {
-            problems.append("abmap: windowed fallback ratio must use the windowed denominator (got \(windowed.emailedOfScrapedPct)% / denom \(windowed.emailedDenominator ?? -1))")
+        if windowed.emailedDenominator != 200 || abs(windowed.emailedOfScrapedPct - 40.0) > 0.001 {
+            problems.append("abmap: unfiltered windowed ratio must use the full-table denominator "
+                + "(got \(windowed.emailedOfScrapedPct)% / denom \(windowed.emailedDenominator ?? -1))")
+        }
+        if windowed.breakdownScopeNote != "2 of 200" {
+            problems.append("abmap: a windowed snapshot must disclose its scope (got \(windowed.breakdownScopeNote ?? "nil"))")
+        }
+        // Windowed AND the exact stage read failed → the denominator narrows to the
+        // window so the ratio stays leads/leads at ONE grain (1 of 2 = 50%).
+        let windowedNoStages = ABLeadsData(inputs: DashboardInputs(
+            leads: leads, totalCount: 200, leadsComplete: false), now: now)
+        if windowedNoStages.totals.emailed != 1 || windowedNoStages.emailedDenominator != 2
+            || abs(windowedNoStages.emailedOfScrapedPct - 50.0) > 0.001 {
+            problems.append("abmap: windowed fallback ratio must use the windowed denominator "
+                + "(got \(windowedNoStages.emailedOfScrapedPct)% / denom \(windowedNoStages.emailedDenominator ?? -1))")
+        }
+        // Windowed AND filtered: the window is all there is — count it, keep the note.
+        let windowedFiltered = ABLeadsData(inputs: windowedInputs,
+                                           filter: LeadFilter(source: "sales-nav"), now: now)
+        if windowedFiltered.totals.scraped != 1 || windowedFiltered.totals.emailed != 1 {
+            problems.append("abmap: a FILTERED windowed load must count the window, not report full-table totals "
+                + "(got \(windowedFiltered.totals.scraped)/\(windowedFiltered.totals.emailed))")
+        }
+        if windowedFiltered.breakdownScopeNote == nil {
+            problems.append("abmap: a filtered windowed load must still disclose the window")
         }
 
         // percent() choke-point is total: negative/zero denominators never divide-by-zero.
         if ABLeadsData.percent(5, of: 0) != 0 { problems.append("abmap: percent(_, of: 0) must be 0") }
         if abs(ABLeadsData.percent(1, of: 4) - 25.0) > 0.001 { problems.append("abmap: percent math") }
 
+        problems.append(contentsOf: leadFilterChecks())
+        problems.append(contentsOf: regionKeyChecks())
+        problems.append(contentsOf: leadSearchChecks())
         return problems
     }
 
-    /// Exercises the Leads compose seam (P1): supplementary results carry an `ok`
-    /// flag, and a FAILED read (not an EMPTY table) marks the load partial —
-    /// surfaced in the recent-leads table title.
+    /// The filter contract: every headline figure is derived from the SAME filtered
+    /// set as the list (the mixed-view bug class), lanes classify correctly, facet
+    /// menus count against the other dimensions, and a degraded lane read disables
+    /// the dimension instead of answering wrongly.
+    private static func leadFilterChecks() -> [String] {
+        var problems: [String] = []
+        let now = abNow
+
+        func lead(_ id: String, source: String, industry: String, state: String?,
+                  location: String? = nil, stage: String, created: String) -> LeadRow {
+            LeadRow(id: id, companyName: "C\(id)", firstName: nil, industry: industry,
+                    leadSource: source, city: nil, state: state, createdAt: created,
+                    enrichmentStage: stage, location: location)
+        }
+        // 4 leads: 2 Florida (one deep + campaigned + replied, one standard),
+        // 1 Texas (from free-text location), 1 unpersonalized California.
+        let leads = [
+            lead("a", source: "gmaps-leads", industry: "Solar", state: "FL",
+                 stage: "campaigned", created: "2026-07-20T12:00:00+00:00"),
+            lead("b", source: "gmaps-leads", industry: "Solar", state: "Florida",
+                 stage: "campaigned", created: "2026-07-20T12:00:00+00:00"),
+            lead("c", source: "sales-nav", industry: "Biotech", state: nil,
+                 location: "Austin, Texas, United States",
+                 stage: "personalized", created: "2026-07-13T12:00:00+00:00"),
+            lead("d", source: "sales-nav", industry: "Biotech", state: "CA",
+                 stage: "scraped", created: "2026-07-06T12:00:00+00:00"),
+        ]
+        let inputs = DashboardInputs(
+            leads: leads, totalCount: 4, leadsComplete: true,
+            deepLaneLeadIDs: ["a"], personalizedLeadIDs: ["a", "b", "c"],
+            repliedLeadIDs: ["a", "b"],
+            messagedSends: [
+                .init(leadID: "a", sentAt: "2026-07-21T09:00:00+00:00"),
+                .init(leadID: "d", sentAt: "2026-07-21T09:00:00+00:00"),
+            ])
+
+        // Unfiltered baseline.
+        let all = ABLeadsData(inputs: inputs, now: now)
+        if all.totals.scraped != 4 || all.totals.emailed != 2 || all.totals.replies != 2 {
+            problems.append("filter: unfiltered totals wrong (\(all.totals.scraped)/\(all.totals.emailed)/\(all.totals.replies))")
+        }
+        // "FL" and "Florida" are the same place — a filter that splits them is
+        // useless on a book two scrapers wrote.
+        if all.byRegion.first(where: { $0.label == "Florida" })?.count != 2 {
+            problems.append("filter: FL and Florida must canonicalize into one region (got \(all.byRegion.map { "\($0.label)=\($0.count)" }))")
+        }
+
+        // Region filter → EVERY figure narrows together.
+        let florida = ABLeadsData(inputs: inputs, filter: LeadFilter(region: "Florida"), now: now)
+        if florida.matchingCount != 2 || florida.recentLeads.count != 2 {
+            problems.append("filter: region must narrow the list (got \(florida.matchingCount)/\(florida.recentLeads.count))")
+        }
+        if florida.totals.scraped != 2 || florida.totals.emailed != 2 || florida.totals.replies != 2 {
+            problems.append("filter: HERO STATS must move with the filter — the whole point of the bar "
+                + "(got \(florida.totals.scraped)/\(florida.totals.emailed)/\(florida.totals.replies))")
+        }
+        if abs(florida.emailedOfScrapedPct - 100.0) > 0.001 {
+            problems.append("filter: ratio must be computed over the filtered set (got \(florida.emailedOfScrapedPct))")
+        }
+        if florida.leadsAddedWeekly.values.reduce(0, +) != 2 {
+            problems.append("filter: the added trend must narrow with the filter")
+        }
+        // Lead "d" was messaged but is filtered out — its send is not this view's trend.
+        if florida.leadsMessagedWeekly.values.reduce(0, +) != 1 {
+            problems.append("filter: the messaged trend must exclude sends to filtered-out leads "
+                + "(got \(florida.leadsMessagedWeekly.values.reduce(0, +)))")
+        }
+        if florida.bySource.count != 1 || florida.byIndustry.count != 1 {
+            problems.append("filter: breakdown panels must count the filtered set only")
+        }
+
+        // Lane classification: deep beats standard; no opener → none.
+        let deep = ABLeadsData(inputs: inputs, filter: LeadFilter(lane: .deep), now: now)
+        if deep.matchingCount != 1 || deep.recentLeads.first?.leadID != "a" {
+            problems.append("filter: deep lane must select exactly the deep-cohort lead (got \(deep.matchingCount))")
+        }
+        let standard = ABLeadsData(inputs: inputs, filter: LeadFilter(lane: .standard), now: now)
+        if standard.matchingCount != 2 {
+            problems.append("filter: standard lane = has an opener but no deep run (got \(standard.matchingCount))")
+        }
+        let unpersonalized = ABLeadsData(inputs: inputs, filter: LeadFilter(lane: LeadFilter.Lane.none), now: now)
+        if unpersonalized.matchingCount != 1 || unpersonalized.recentLeads.first?.leadID != "d" {
+            problems.append("filter: 'not personalized' must select the lead with no opener (got \(unpersonalized.matchingCount))")
+        }
+
+        // Free-text LinkedIn location must land in a real region bucket, not Unknown.
+        let texas = ABLeadsData(inputs: inputs, filter: LeadFilter(region: "Texas"), now: now)
+        if texas.matchingCount != 1 || texas.recentLeads.first?.leadID != "c" {
+            problems.append("filter: a sales-nav free-text location must still be filterable by region")
+        }
+
+        // Dimensions AND together, and an impossible combination is an honest zero
+        // (not a crash, not the unfiltered view).
+        let impossible = ABLeadsData(inputs: inputs,
+                                     filter: LeadFilter(region: "Florida", source: "sales-nav"), now: now)
+        if impossible.matchingCount != 0 || !impossible.recentLeads.isEmpty
+            || impossible.totals.scraped != 0 || impossible.emailedOfScrapedPct != 0 {
+            problems.append("filter: contradictory dimensions must yield an empty, non-NaN view "
+                + "(got \(impossible.matchingCount) leads, \(impossible.emailedOfScrapedPct)%)")
+        }
+
+        // Facet menus count against the OTHER dimensions: with Florida picked, the
+        // source menu offers only sources present in Florida — never a choice that
+        // would return nothing.
+        let facets = florida.facets
+        if facets.sources.map(\.value) != ["gmaps-leads"] {
+            problems.append("filter: source menu must count within the other active dimensions (got \(facets.sources.map(\.value)))")
+        }
+        // …but the REGION menu itself still offers every region, or picking a
+        // different one would be impossible once one is chosen.
+        if Set(facets.regions.map(\.value)) != ["Florida", "Texas", "California"] {
+            problems.append("filter: a dimension's own menu must ignore its own selection (got \(facets.regions.map(\.value)))")
+        }
+        if facets.regions.first?.value != "Florida" || facets.regions.first?.count != 2 {
+            problems.append("filter: facet options must be largest-first with counts (got \(facets.regions.map { "\($0.value)=\($0.count)" }))")
+        }
+        // Unfiltered, the lane menu counts the whole book: 1 deep, 2 standard, 1 none.
+        if all.facets.lanes.map(\.count) != [1, 2, 1] {
+            problems.append("filter: lane facet counts wrong (got \(all.facets.lanes.map { "\($0.lane.rawValue)=\($0.count)" }))")
+        }
+        // Under the Florida filter it counts only Florida's leads — and drops
+        // "not personalized" entirely, because picking it there would show nothing.
+        if facets.lanes.map({ "\($0.lane.rawValue)=\($0.count)" }) != ["deep=1", "standard=1"] {
+            problems.append("filter: lane menu must count within the other dimensions "
+                + "(got \(facets.lanes.map { "\($0.lane.rawValue)=\($0.count)" }))")
+        }
+
+        // Degraded lane reads: the dimension is dropped rather than answered wrongly
+        // (empty id sets would classify every lead "Not personalized").
+        var degradedInputs = inputs
+        degradedInputs.deepLaneLeadIDs = []
+        degradedInputs.personalizedLeadIDs = []
+        degradedInputs.lanesDegraded = true
+        let degraded = ABLeadsData(inputs: degradedInputs, filter: LeadFilter(lane: .deep), now: now)
+        if degraded.laneFilterAvailable {
+            problems.append("filter: a failed lane read must disable the lane menu")
+        }
+        if degraded.filter.lane != nil || degraded.matchingCount != 4 {
+            problems.append("filter: a lane filter over degraded lane data must be dropped, not applied "
+                + "(got \(degraded.matchingCount) leads)")
+        }
+
+        // The list is capped, and says so through matchingCount ≠ rendered rows.
+        let many = (0..<(ABLeadsData.listCap + 5)).map {
+            lead("m\($0)", source: "gmaps-leads", industry: "Solar", state: "FL",
+                 stage: "scraped", created: "2026-07-20T12:00:00+00:00")
+        }
+        let capped = ABLeadsData(inputs: DashboardInputs(leads: many, totalCount: many.count,
+                                                         leadsComplete: true), now: now)
+        if capped.recentLeads.count != ABLeadsData.listCap || capped.matchingCount != many.count {
+            problems.append("filter: the list must cap at listCap while reporting the true match count "
+                + "(rendered \(capped.recentLeads.count), matching \(capped.matchingCount))")
+        }
+
+        // LeadFilter's own contract.
+        if LeadFilter.all.isActive { problems.append("filter: the empty filter must not read as active") }
+        if LeadFilter(region: "Texas").summary != "Texas" {
+            problems.append("filter: summary should name the active dimensions")
+        }
+        if LeadFilter(lane: .deep, region: "Texas").summary != "Deep lane · Texas" {
+            problems.append("filter: summary should join every active dimension")
+        }
+        return problems
+    }
+
+    /// Region derivation goldens (`RegionKey`). Both halves matter: the shapes it
+    /// must place, and the shapes it must REFUSE to guess at.
+    private static func regionKeyChecks() -> [String] {
+        var problems: [String] = []
+        func check(_ name: String, city: String? = nil, state: String? = nil,
+                   location: String? = nil, country: String? = nil, _ expected: String) {
+            let got = RegionKey.region(city: city, state: state, location: location, country: country)
+            if got != expected {
+                problems.append("region \(name): got '\(got)', want '\(expected)'")
+            }
+        }
+        // The state column wins, in either scraper's spelling.
+        check("abbrev", state: "FL", "Florida")
+        check("full name", state: "Florida", "Florida")
+        check("lowercase", state: "florida", "Florida")
+        check("padded", state: "  CA  ", "California")
+        // LinkedIn free text.
+        check("city/state/country", location: "Austin, Texas, United States", "Texas")
+        check("county", location: "Los Angeles County, California, United States", "California")
+        check("metro suffix", location: "Austin, Texas Metropolitan Area", "Texas")
+        check("named metro", location: "San Francisco Bay Area", "California")
+        check("greater metro", location: "Greater Houston", "Texas")
+        check("metroplex", location: "Dallas-Fort Worth Metroplex", "Texas")
+        check("foreign", location: "London, England, United Kingdom", "United Kingdom")
+        check("country only", location: "Ireland", "Ireland")
+        check("US only", location: "United States", "United States")
+        // A bare two-letter token is NOT trusted as a state without a US marker:
+        // "DE" is Delaware in one book and Germany in the other.
+        check("ambiguous abbrev", location: "Berlin, DE", "DE")
+        check("abbrev with US marker", location: "Miami, FL, United States", "Florida")
+        // Fallbacks.
+        check("country column", country: "USA", "United States")
+        check("country column literal", country: "Canada", "Canada")
+        check("nothing", "Unknown")
+        check("blank strings", state: "  ", location: "", country: "  ", "Unknown")
+        // City alone is never enough to name a region — refusing to guess is the
+        // contract (a wrong bucket is worse than an honest Unknown).
+        check("city only", city: "Tampa", "Unknown")
+        return problems
+    }
+
+    /// Search: the sanitizer (a filter-grammar injection guard) and the query it
+    /// builds. Every denied character below can rewrite the PostgREST `or=()`
+    /// predicate or turn the search into a full-table dump.
+    private static func leadSearchChecks() -> [String] {
+        var problems: [String] = []
+        func term(_ raw: String) -> String? { LeadsRepository.searchTerm(raw) }
+
+        if term("Acme Solar") != "Acme Solar" { problems.append("search: a plain term must pass through unchanged") }
+        if term("  Acme   Solar  ") != "Acme Solar" { problems.append("search: whitespace must collapse") }
+        if term("O'Brien & Sons-Ltd.") != "O'Brien & Sons-Ltd." {
+            problems.append("search: punctuation that is safe in a value must survive (got \(term("O'Brien & Sons-Ltd.") ?? "nil"))")
+        }
+        // Injection: a comma would start a NEW predicate inside or=(…).
+        if term("acme,email.ilike.*@*") != "acme email.ilike. @" {
+            problems.append("search: the or() grammar characters must be stripped (got \(term("acme,email.ilike.*@*") ?? "nil"))")
+        }
+        for hostile in ["a,b", "a(b", "a)b", "a*b", "a%b", "a\\b", "a\"b"] {
+            if let cleaned = term(hostile),
+               cleaned.contains(where: { ",()*%\\\"".contains($0) }) {
+                problems.append("search: '\(hostile)' left a grammar character in '\(cleaned)'")
+            }
+        }
+        // A lone wildcard is not a search — it must not become `ilike.**`.
+        if term("%") != nil || term("*") != nil || term(" ") != nil {
+            problems.append("search: a wildcard-only/blank term must not run a query")
+        }
+        if term("a") != nil { problems.append("search: a single character is below the minimum") }
+        if term(String(repeating: "x", count: 500))?.count != LeadsRepository.searchTermLimit {
+            problems.append("search: an over-long term must be capped at searchTermLimit")
+        }
+        if term("Acme\nSolar\tCo") != "Acme Solar Co" {
+            problems.append("search: newlines/tabs must collapse to spaces, not vanish")
+        }
+        // `_` is LIKE's single-char wildcard: kept (it can only widen a match, and
+        // stripping it breaks a literal search for a name containing one).
+        if term("acme_corp") != "acme_corp" { problems.append("search: '_' must be preserved") }
+
+        // The built filter covers company AND person name, and stays one group.
+        let filter = LeadsRepository.searchFilter("Acme")
+        for column in ["company_name", "full_name", "first_name", "last_name", "email"]
+        where !filter.contains("\(column).ilike.*Acme*") {
+            problems.append("search: filter must cover \(column) (got \(filter))")
+        }
+        if !filter.hasPrefix("(") || !filter.hasSuffix(")") || filter.dropLast().dropFirst().contains("(") {
+            problems.append("search: filter must be exactly one or() group (got \(filter))")
+        }
+        return problems
+    }
+
+    /// Exercises the Leads compose seam: supplementary results carry an `ok` flag,
+    /// a FAILED read (not an EMPTY table) marks the load partial, and a failed LANE
+    /// read additionally marks it degraded — because empty lane sets are not "no
+    /// deep-lane leads", they are "we don't know", and the two must not render the
+    /// same.
     private static func leadsComposeChecks(sampleLeads: [LeadRow]) -> [String] {
         var problems: [String] = []
 
-        // Both supplementary reads ok (even if empty) → NOT partial.
+        // Every supplementary read ok (even when empty) → NOT partial, NOT degraded.
         let clean = LeadsRepository.compose(
-            leads: sampleLeads, totalCount: 10,
-            tiers: ([:], ok: true), sentiment: (["positive": 2], ok: true))
-        if clean.partial { problems.append("leads-compose: ok reads must not mark partial") }
-        if clean.sentimentCounts["positive"] != 2 || !clean.tierCounts.isEmpty {
-            problems.append("leads-compose: counts not packaged through")
+            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
+            deep: (["a"], ok: true), personalized: (["a", "b"], ok: true),
+            replied: ([], ok: true))
+        if clean.partial || clean.lanesDegraded {
+            problems.append("leads-compose: ok reads must not mark partial/degraded")
+        }
+        if clean.deepLaneLeadIDs != ["a"] || clean.personalizedLeadIDs != ["a", "b"] {
+            problems.append("leads-compose: lane id sets not packaged through")
+        }
+        if !clean.leadsComplete { problems.append("leads-compose: a full page walk over the whole table is complete") }
+
+        // A short walk is NOT a complete snapshot even if paging ended cleanly:
+        // rows written mid-walk (or invisible to RLS) leave us below the total.
+        let short = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: 720, leadsComplete: true)
+        if short.leadsComplete {
+            problems.append("leads-compose: fewer rows than the exact total must not read as complete")
+        }
+        // …and hitting the page cap is never complete.
+        let cappedWalk = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: false)
+        if cappedWalk.leadsComplete {
+            problems.append("leads-compose: a capped page walk must not read as complete")
         }
 
-        // Exact status counts: packaged through when ok, dropped (→ windowed fallback)
-        // when the read failed — and a failed status read must NOT mark partial
-        // (the fallback board carries its own honest scope suffix instead).
-        let withStatus = LeadsRepository.compose(
+        // A failed LANE read → partial AND degraded (the lane menu disables itself).
+        let laneFailed = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
+            deep: ([], ok: false), personalized: ([], ok: true), replied: ([], ok: true))
+        if !laneFailed.partial || !laneFailed.lanesDegraded {
+            problems.append("leads-compose: a failed lane read must mark partial AND degraded")
+        }
+        // A failed REPLIES read is partial but not lane-degraded — the reply figure
+        // is understated, the lane classification is still sound.
+        let repliesFailed = LeadsRepository.compose(
+            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
+            deep: ([], ok: true), personalized: ([], ok: true), replied: ([], ok: false))
+        if !repliesFailed.partial || repliesFailed.lanesDegraded {
+            problems.append("leads-compose: a failed replies read is partial, not lane-degraded")
+        }
+
+        // The widget/packer path still reads exact stage counts off DashboardInputs.
+        let withStatus = DashboardInputs(
             leads: sampleLeads, totalCount: 720,
-            tiers: ([:], ok: true), sentiment: ([:], ok: true),
-            status: (["scraped": 400, "personalized": 300, "unknown": 20], ok: true))
-        if withStatus.statusCounts.isEmpty { problems.append("leads-compose: ok status counts must package through") }
+            statusCounts: ["scraped": 400, "personalized": 300, "unknown": 20])
         if case .statusBoard(let board)? = DashboardBuilder.widgetData(withStatus)["by-status"] {
             if board.title != "Leads by Status" {
                 problems.append("leads-compose: exact status board must not carry a window suffix (got '\(board.title)')")
@@ -342,13 +679,8 @@ enum SelfTest {
                 problems.append("leads-compose: exact status labels unexpected")
             }
         } else { problems.append("leads-compose: exact by-status is not a status board") }
-        let statusFailed = LeadsRepository.compose(
-            leads: sampleLeads, totalCount: 720,
-            tiers: ([:], ok: true), sentiment: ([:], ok: true),
-            status: (["scraped": 1], ok: false))
-        if !statusFailed.statusCounts.isEmpty { problems.append("leads-compose: failed status read must drop counts") }
-        if statusFailed.partial { problems.append("leads-compose: failed status read must not mark partial") }
-        if case .statusBoard(let board)? = DashboardBuilder.widgetData(statusFailed)["by-status"],
+        let noStatus = DashboardInputs(leads: sampleLeads, totalCount: 720)
+        if case .statusBoard(let board)? = DashboardBuilder.widgetData(noStatus)["by-status"],
            !board.title.contains("(latest") {
             problems.append("leads-compose: fallback status board must carry the window suffix")
         }
@@ -357,15 +689,27 @@ enum SelfTest {
             problems.append("leads-compose: clean load must not title the chart partial")
         }
 
-        // A failed supplementary read → partial, surfaced in the chart title
-        // (the partial signal moved there when recent-leads left the grid, P3).
-        let degraded = LeadsRepository.compose(
-            leads: sampleLeads, totalCount: 10,
-            tiers: ([:], ok: false), sentiment: ([:], ok: true))
-        if !degraded.partial { problems.append("leads-compose: failed tier read must mark partial") }
-        if case .chart(let c)? = DashboardBuilder.build(degraded).widgets["added-weekly"],
+        // A partial load surfaces in the chart title (the partial signal moved there
+        // when recent-leads left the grid, P3).
+        if case .chart(let c)? = DashboardBuilder.build(laneFailed).widgets["added-weekly"],
            !c.title.contains("partial") {
             problems.append("leads-compose: partial must surface in the added-weekly title")
+        }
+
+        // leadIDs (the lane/replied page parser): an unparseable 2xx body is a
+        // FAILED page (nil), never an empty one — same contract as `tally`, and it
+        // matters more here (an "empty" lane set misclassifies every lead).
+        if LeadsRepository.leadIDs(Data("not json".utf8)) != nil {
+            problems.append("leads-ids: garbage body must be nil (failed read), not empty")
+        }
+        let idPage = LeadsRepository.leadIDs(
+            Data(#"[{"lead_id":"a"},{"lead_id":"a"},{"lead_id":" "},{"lead_id":null}]"#.utf8))
+        if idPage?.ids != ["a"] || idPage?.rows != 4 {
+            problems.append("leads-ids: expected {a}/4 rows (rows counts EVERY row so paging "
+                + "advances), got \(String(describing: idPage))")
+        }
+        if LeadsRepository.leadIDs(Data("[]".utf8))?.rows != 0 {
+            problems.append("leads-ids: [] must parse as an EMPTY page, not a failure")
         }
 
         // tally (the paged read's pure page parser): an unparseable 2xx body must

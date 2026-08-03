@@ -17,11 +17,25 @@ swift run                 # launches the app window
 Resize the window to see the responsive breakpoints (`lg` ≥1200, `md` ≥996, `sm`
 below) switch — the indicator pill in the toolbar shows the active one.
 
+Offline dev mode (no Keychain, no network — the Leads tab only):
+
+```sh
+swift run CECDashboard --fixture
+```
+
+`--fixture` boots the real window over a synthetic lead book, so live-layout and
+interaction questions (where the list starts, whether a column scrolls, how a
+filter feels) can be answered without credentials. The still harness cannot answer
+them: `ImageRenderer` can't rasterize a `ScrollView`, so every `--screenshot` goes
+through the `staticRender` substitute path.
+
 ## Verify (headless)
 
 ```sh
 swift build
-./.build/debug/LeadDashboard --selftest    # decodes the mock contract, prints PASS/FAIL
+./.build/debug/CECDashboard --selftest         # pure seams + preview render checks
+./.build/debug/CECDashboard --check-supabase   # live reads incl. lane/reply probes
+./.build/debug/CECDashboard --screenshot list  # registered preview stills
 ```
 
 ## What's here (M0)

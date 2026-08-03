@@ -24,6 +24,22 @@ struct ABLeadsView: View {
     var isRefreshing: Bool = false
     /// When set, a slim "showing last data" banner rides above the content.
     var staleMessage: String? = nil
+    /// Filter changes (live tab). nil = the bar is inert (fixture/harness path).
+    var onFilterChange: ((LeadFilter) -> Void)? = nil
+    /// Search box binding + actions. nil = no search box (fixture/harness path,
+    /// unless `searchState` is set for a still).
+    var searchQuery: Binding<String>? = nil
+    var searchState: LeadSearchModel.SearchState = .idle
+    var onSearchSubmit: (() -> Void)? = nil
+    var onSearchClear: (() -> Void)? = nil
+
+    /// True while search results own the list column.
+    private var searching: Bool {
+        switch searchState {
+        case .idle: return false
+        case .searching, .results, .failed: return true
+        }
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -50,37 +66,61 @@ struct ABLeadsView: View {
         VStack(alignment: .leading, spacing: DesignTokens.space4) {
             if let staleMessage { ABStaleBanner(message: staleMessage) }
             header
-            ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)      // level 1
+            ABFilterBar(data: data, onChange: onFilterChange ?? { _ in })      // lens
+            ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)       // level 1
             ABTrendRow(data: data)                                            // level 2
 
-            // VARIANT C: levels 3 + 4 share one band (Arm A layout). The recent
-            // list flexes wide on the LEFT so it clears the fold; the three
-            // breakdowns stack COMPACTLY in a narrow right column.
+            // VARIANT C: levels 3 + 4 share one band (Arm A layout). The lead list
+            // flexes wide on the LEFT so it clears the fold; the breakdowns stack
+            // COMPACTLY in a narrow right column.
+            //
+            // This band takes the REMAINING window height — the page itself does
+            // not scroll. Each column owns its own bounded scroll view, which is
+            // what keeps the list starting at its first row (see ABLeadRowsTable)
+            // and keeps the hero figures on screen while a filter is being changed:
+            // watching those numbers move IS the filter's feedback.
             HStack(alignment: .top, spacing: DesignTokens.space5) {
-                ABRecentLeadsTable(leads: data.recentLeads,
-                    forcedHoverIndex: interactionDemo ? 1 : nil,
-                    staticRender: staticRender,
-                    onSelect: onSelectLead)                                   // level 4
+                listColumn                                                    // level 4
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 ABBreakdownRowGroup(data: data,
+                    staticRender: staticRender,
                     forcedHoverStatusLabel: interactionDemo ? "Replied" : nil) // level 3
                     .frame(width: 384)
             }
-            .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
+    /// Search results take over the list column while a search is on screen —
+    /// two lists side by side would leave "which of these is the lead book?"
+    /// unanswered.
+    @ViewBuilder
+    private var listColumn: some View {
+        if searching {
+            ABSearchResultsPanel(state: searchState, staticRender: staticRender,
+                                 onSelect: onSelectLead,
+                                 onClear: onSearchClear ?? {})
+        } else {
+            ABRecentLeadsTable(leads: data.recentLeads,
+                               matchingCount: data.matchingCount,
+                               filterSummary: data.filter.summary,
+                               forcedHoverIndex: interactionDemo ? 1 : nil,
+                               staticRender: staticRender,
+                               onSelect: onSelectLead)
         }
     }
 
     @ViewBuilder
     private var content: some View {
-        if staticRender {
-            stack   // plain layout so ImageRenderer captures it
-        } else {
-            ScrollView { stack }
-        }
+        // No page-level ScrollView, in either mode: the tab is a fixed dashboard
+        // whose one scrolling region is the list. (The harness additionally can't
+        // capture ScrollView content at all, which `staticRender` handles inside
+        // the columns.)
+        stack
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center, spacing: DesignTokens.space4) {
             VStack(alignment: .leading, spacing: DesignTokens.space1) {
                 Text("Leads")
                     .font(.adventor(DesignTokens.textXl, bold: true))
@@ -88,7 +128,14 @@ struct ABLeadsView: View {
                 Rectangle().fill(DesignTokens.accent)
                     .frame(width: 34, height: 2)   // flat teal rule (glow reserved for hero)
             }
-            Spacer()
+            if let searchQuery {
+                ABSearchField(query: searchQuery,
+                              isSearching: searchState.isSearching,
+                              hasResults: searching,
+                              onSubmit: onSearchSubmit ?? {},
+                              onClear: onSearchClear ?? {})
+            }
+            Spacer(minLength: DesignTokens.space4)
             HStack(spacing: DesignTokens.space4) {
                 summaryStat(value: data.totals.scraped, label: "scraped", color: DesignTokens.textSecondary)
                 summaryStat(value: data.totals.emailed, label: "emailed", color: DesignTokens.accent)

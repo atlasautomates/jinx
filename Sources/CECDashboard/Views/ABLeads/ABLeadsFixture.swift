@@ -32,10 +32,33 @@ struct ABLeadsData: Sendable {
     /// but the windowed fallback (exact stage read failed) narrows it to the fetched
     /// window so the hero ratio stays leads/leads at one grain. nil in the fixture.
     var emailedDenominator: Int? = nil
-    /// "N of M" when the source/industry breakdowns are computed over a fetched
-    /// window smaller than the true total — surfaced so a windowed slice is never
-    /// presented as a full-table total. nil (no note) in the fixture / when complete.
+    /// "N of M" when the breakdowns are computed over a fetched window smaller than
+    /// the true total — surfaced so a windowed slice is never presented as a
+    /// full-table total. nil (no note) in the fixture / when complete.
     var breakdownScopeNote: String? = nil
+
+    // MARK: - Filtering (leads-filter)
+
+    /// Where each lead sits geographically (derived — see `RegionKey`).
+    var byRegion: [Breakdown] = []
+    /// The lens currently applied. Every figure above is computed from the leads
+    /// that pass it — there is no path that mixes a filtered list with unfiltered
+    /// headline stats.
+    var filter: LeadFilter = .all
+    /// Menu contents for the filter bar, counted over the current lead set.
+    var facets: FilterFacets = FilterFacets()
+    /// False when the lane reads failed — the lane menu hides rather than claim
+    /// every lead is "Not personalized".
+    var laneFilterAvailable: Bool = true
+    /// Leads passing the filter (the list is capped; this is the honest total).
+    var matchingCount: Int = 0
+    /// True when a supplementary read degraded this load.
+    var partial: Bool = false
+
+    /// Rows the recent-leads list renders at most. The list is lazy, but every row
+    /// is an interactive, hoverable view — past a few hundred the scroll cost is
+    /// real and nobody reads row 900. The header states the cap when it bites.
+    static let listCap = 300
 
     static let ab = ABLeadsData(
         totals: .init(scraped: 1240, emailed: 861, replies: 74),
@@ -95,8 +118,53 @@ struct ABLeadsData: Sendable {
             .init(company: "Velocity EV Outlet", industry: "EV Dealers", location: "Reno, NV", source: "Sales Navigator", status: "Scraped", added: "2026-07-10"),
             .init(company: "Thistlecombe CU", industry: "Credit Unions", location: "Bakersfield, CA", source: "Apollo", status: "Emailed", added: "2026-07-09"),
             .init(company: "Glintmoor Web Co", industry: "Web Agencies", location: "San Antonio, TX", source: "Job Signals", status: "Personalized", added: "2026-07-09"),
-        ]
+        ],
+        byRegion: [
+            .init(label: "Florida", count: 341),
+            .init(label: "California", count: 296),
+            .init(label: "Texas", count: 214),
+            .init(label: "Arizona", count: 188),
+            .init(label: "United Kingdom", count: 96),
+            .init(label: "Unknown", count: 105),
+        ],
+        facets: FilterFacets(
+            lanes: [(.deep, 96), (.standard, 765), (LeadFilter.Lane.none, 379)],
+            regions: [.init(value: "Florida", count: 341), .init(value: "California", count: 296),
+                      .init(value: "Texas", count: 214), .init(value: "Arizona", count: 188),
+                      .init(value: "United Kingdom", count: 96), .init(value: "Unknown", count: 105)],
+            sources: [.init(value: "Sales Navigator", count: 512), .init(value: "Google Maps", count: 388),
+                      .init(value: "Apollo", count: 204), .init(value: "Job Signals", count: 136)],
+            industries: [.init(value: "Assisted Living", count: 296), .init(value: "Residential Solar", count: 248),
+                         .init(value: "EV Dealers", count: 187), .init(value: "Biotech", count: 183),
+                         .init(value: "Credit Unions", count: 174), .init(value: "Web Agencies", count: 152)]),
+        matchingCount: 1240
     )
+
+    /// Frozen "filter applied" variant for the preview harness — the same fixture
+    /// narrowed to one lane + one region, so a still can show the filter bar in its
+    /// active state and the hero numbers moving with it (bible §9).
+    static let abFiltered: ABLeadsData = {
+        var d = ABLeadsData(
+            totals: .init(scraped: 296, emailed: 214, replies: 31),
+            emailedOfScrapedPct: 72.3,
+            repliesOfEmailedPct: 14.5,
+            leadsAddedWeekly: .init(weeks: ab.leadsAddedWeekly.weeks,
+                                    values: [8, 11, 14, 12, 17, 21, 15, 18, 24, 27, 21, 25]),
+            leadsMessagedWeekly: .init(weeks: ab.leadsMessagedWeekly.weeks,
+                                       values: [5, 7, 9, 8, 13, 14, 11, 13, 18, 20, 16, 19]),
+            bySource: [.init(label: "Sales Navigator", count: 171), .init(label: "Google Maps", count: 125)],
+            byIndustry: [.init(label: "Residential Solar", count: 141), .init(label: "Assisted Living", count: 96),
+                         .init(label: "Credit Unions", count: 59)],
+            byStatus: [.init(label: "Campaigned", count: 214), .init(label: "Personalized", count: 46),
+                       .init(label: "Scraped", count: 36)],
+            recentLeads: Array(ab.recentLeads.filter { $0.location.hasSuffix("CA") }),
+            byRegion: [.init(label: "California", count: 296)],
+            filter: LeadFilter(lane: .standard, region: "California"),
+            facets: ab.facets,
+            matchingCount: 296)
+        d.emailedDenominator = 296
+        return d
+    }()
 }
 
 // Status -> role color mapping (two-accent discipline; decision-log #5).
@@ -126,60 +194,110 @@ extension ABLeadsData {
     /// tolerated (all-zero series, nil fields, failed supplementary reads).
     ///
     /// Mapping decisions (documented in SHIP-NOTES.md):
-    /// - `scraped`  = exact full-table lead count (`totalCount`).
-    /// - `emailed`  = distinct leads that reached the `campaigned` enrichment stage
-    ///   (added to an outbound campaign). Exact when the full-table stage counts are
-    ///   present; else a windowed fallback from the fetched leads — and then the
-    ///   ratio denominator narrows to the same window so it stays leads/leads.
-    /// - `replies`  = distinct replied leads (`inputs.replyCount`, fail-open to 0),
-    ///   the same grain as `emailed`, so the reply rate can't exceed 100% on
-    ///   multi-reply threads.
+    /// - EVERY figure is computed from the leads passing `filter`. There is no
+    ///   path that pairs a filtered list with unfiltered headline stats — that was
+    ///   the whole point of the filter bar, and a mixed view is a lie the user
+    ///   cannot see.
+    /// - `scraped`  = leads matching the filter. Exact while the snapshot is the
+    ///   whole table (`leadsComplete`); otherwise the unfiltered view keeps using
+    ///   the exact full-table figures and the filtered view discloses "N of M".
+    /// - `emailed`  = matching leads at the `campaigned` enrichment stage (added to
+    ///   an outbound campaign).
+    /// - `replies`  = matching leads that appear in `replies` — the same lead grain
+    ///   as `emailed`, so the reply rate can't exceed 100% on multi-reply threads.
     /// - weekly series share ONE 12-week window anchored to `now` (aligned axes):
-    ///   added counts distinct leads by `created_at`; messaged counts DISTINCT leads
-    ///   per week by `send_queue.sent_at`. Both fail-open to a zero-filled series.
-    /// - breakdowns come from the fetched leads window (with a "N of M" scope note
-    ///   when windowed) / exact stage counts.
+    ///   added counts distinct matching leads by `created_at`; messaged counts
+    ///   DISTINCT matching leads per week by `send_queue.sent_at`. Both fail-open to
+    ///   a zero-filled series.
+    /// - breakdowns + facet menus count over the same matching set.
     ///
     /// `now` is injectable for deterministic tests; production passes the wall clock.
-    init(inputs: DashboardInputs, now: Date = Date()) {
-        let scraped = inputs.totalCount
-        // Exact per-lead campaigned count when the full-table stage read succeeded;
-        // else a windowed fallback (and the ratio denominator narrows to match).
-        let usedWindowedEmailed = inputs.statusCounts.isEmpty
-        let emailed: Int = usedWindowedEmailed
-            ? inputs.leads.filter { ($0.enrichmentStage ?? "").lowercased() == "campaigned" }.count
-            : (inputs.statusCounts["campaigned"] ?? 0)
-        let ratioDenominator = usedWindowedEmailed ? inputs.leads.count : scraped
-        let replies = max(0, inputs.replyCount)
+    init(inputs: DashboardInputs, filter: LeadFilter = .all, now: Date = Date()) {
+        let facets = inputs.leads.map {
+            LeadFacets(lead: $0,
+                       deepLane: inputs.deepLaneLeadIDs.contains($0.id),
+                       personalized: inputs.personalizedLeadIDs.contains($0.id))
+        }
+        // A lane filter over degraded lane reads would silently answer "everything
+        // is unpersonalized". Drop that dimension rather than answer wrongly.
+        let effective = inputs.lanesDegraded ? LeadFilter(lane: nil, region: filter.region,
+                                                          source: filter.source,
+                                                          industry: filter.industry) : filter
+        let matchingIndices = facets.indices.filter { effective.matches(facets[$0]) }
+        let matching = matchingIndices.map { inputs.leads[$0] }
+        let matchingFacets = matchingIndices.map { facets[$0] }
+        let matchingIDs = Set(matching.map(\.id))
 
+        // Which arithmetic the headline figures use:
+        // - complete snapshot → count the matching rows (exact, and it moves with
+        //   the filter);
+        // - windowed snapshot, nothing filtered → keep the exact full-table figures
+        //   the HEAD reads give us, rather than downgrading a working number;
+        // - windowed snapshot + a filter → the window is all we have; count it and
+        //   say so ("N of M").
+        let windowed = !inputs.leadsComplete
+        let useGlobals = windowed && !effective.isActive
+
+        let scraped = useGlobals ? inputs.totalCount : matching.count
+        let emailed = useGlobals
+            ? (inputs.statusCounts["campaigned"] ?? ABLeadsData.campaignedCount(matching))
+            : ABLeadsData.campaignedCount(matching)
+        let replies = useGlobals
+            ? inputs.repliedLeadIDs.count
+            : inputs.repliedLeadIDs.intersection(matchingIDs).count
+        // Denominator matches the numerator's grain: full table when both are
+        // full-table figures, the matching set otherwise.
+        let ratioDenominator = useGlobals
+            ? (inputs.statusCounts.isEmpty ? inputs.leads.count : inputs.totalCount)
+            : matching.count
+
+        self.filter = effective
+        self.laneFilterAvailable = !inputs.lanesDegraded
+        self.partial = inputs.partial
+        self.matchingCount = matching.count
         self.totals = Totals(scraped: scraped, emailed: emailed, replies: replies)
         self.emailedDenominator = ratioDenominator
         self.emailedOfScrapedPct = ABLeadsData.percent(emailed, of: ratioDenominator)
         self.repliesOfEmailedPct = ABLeadsData.percent(replies, of: emailed)
 
         self.leadsAddedWeekly = ABLeadsData.weeklySeries(
-            timestamps: inputs.leads.compactMap { $0.createdAt }, weeks: 12, now: now)
-        self.leadsMessagedWeekly = ABLeadsData.weeklySeries(
-            events: inputs.messagedSends, weeks: 12, now: now)
+            timestamps: matching.compactMap { $0.createdAt }, weeks: 12, now: now)
+        // Sends belonging to leads outside the current lens are not this view's
+        // trend — except in the globals case, where the snapshot is a window and
+        // intersecting it would under-count sends to leads we simply didn't fetch.
+        let sends = useGlobals ? inputs.messagedSends
+                               : inputs.messagedSends.filter { matchingIDs.contains($0.leadID) }
+        self.leadsMessagedWeekly = ABLeadsData.weeklySeries(events: sends, weeks: 12, now: now)
 
-        self.bySource = ABLeadsData.breakdown(inputs.leads, topN: 6) { $0.leadSource }
-        self.byIndustry = ABLeadsData.breakdown(inputs.leads, topN: 6) { $0.industry }
-        self.byStatus = ABLeadsData.statusBreakdown(inputs)
-        // Source/industry are windowed over the fetched leads; disclose it when the
-        // window is smaller than the true total (byStatus uses exact counts — no note).
-        self.breakdownScopeNote = inputs.totalCount > inputs.leads.count
+        self.bySource = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.source }
+        self.byIndustry = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.industry }
+        self.byRegion = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.region }
+        self.byStatus = ABLeadsData.statusBreakdown(matching)
+        self.facets = FilterFacets.build(facets, filter: effective)
+        // Disclose whenever the numbers come from a window rather than the book.
+        self.breakdownScopeNote = windowed
             ? "\(inputs.leads.count) of \(inputs.totalCount)" : nil
 
-        self.recentLeads = inputs.leads.prefix(50).map { row in
-            Lead(leadID: row.id,
-                 company: row.companyName?.nilIfEmpty ?? "Unknown",
-                 industry: row.industry?.nilIfEmpty ?? "—",
-                 location: ABLeadsData.locationLabel(city: row.city, state: row.state),
-                 source: row.leadSource?.nilIfEmpty ?? "—",
-                 status: ABLeadsData.stageLabel(row.enrichmentStage),
-                 added: ABLeadsData.dayLabel(row.createdAt),
-                 firstName: row.firstName?.nilIfEmpty)
-        }
+        self.recentLeads = matching.prefix(ABLeadsData.listCap).map(ABLeadsData.lead)
+    }
+
+    /// One DB row → one list row. Shared by the tab's list and the search results,
+    /// so a hit renders exactly like the lead it is.
+    static func lead(_ row: LeadRow) -> Lead {
+        Lead(leadID: row.id,
+             company: row.companyName?.nilIfEmpty ?? "Unknown",
+             industry: row.industry?.nilIfEmpty ?? "—",
+             location: locationLabel(city: row.city, state: row.state, location: row.location),
+             source: row.leadSource?.nilIfEmpty ?? "—",
+             status: stageLabel(row.enrichmentStage),
+             added: dayLabel(row.createdAt),
+             firstName: row.firstName?.nilIfEmpty)
+    }
+
+    /// Leads that reached the outreach stage. One spelling of the comparison, used
+    /// by both the exact and windowed paths.
+    static func campaignedCount(_ leads: [LeadRow]) -> Int {
+        leads.filter { ($0.enrichmentStage ?? "").lowercased() == "campaigned" }.count
     }
 
     /// `n/d` as a percentage, guarded: a zero (or negative) denominator yields 0,
@@ -188,9 +306,13 @@ extension ABLeadsData {
         d > 0 ? (Double(n) / Double(d)) * 100.0 : 0
     }
 
-    private static func locationLabel(city: String?, state: String?) -> String {
+    /// Row label for where a lead is. Prefers the structured city/state pair; falls
+    /// back to the free-text `location` the Sales Navigator path writes instead
+    /// (without it, ~3 of every 4 rows showed an em dash).
+    static func locationLabel(city: String?, state: String?, location: String? = nil) -> String {
         let parts = [city, state].compactMap { $0?.nilIfEmpty }
-        return parts.isEmpty ? "—" : parts.joined(separator: ", ")
+        if !parts.isEmpty { return parts.joined(separator: ", ") }
+        return location?.nilIfEmpty ?? "—"
     }
 
     /// Locale-stable display casing for a stage token; nil/empty → "Unknown".
@@ -201,7 +323,7 @@ extension ABLeadsData {
 
     /// `created_at` timestamp → a stable "yyyy-MM-dd" day label (matching the
     /// fixture's `added` format); unparseable/nil → "—".
-    private static func dayLabel(_ iso: String?) -> String {
+    static func dayLabel(_ iso: String?) -> String {
         guard let date = DateParse.iso(iso) else { return "—" }
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -210,32 +332,26 @@ extension ABLeadsData {
         return f.string(from: date)
     }
 
-    /// Count a categorical lead field (nil/empty → "Unknown"), largest first
-    /// (ties broken by label for determinism), capped at `topN` with the tail
-    /// folded into a neutral "Other".
-    private static func breakdown(
-        _ leads: [LeadRow], topN: Int, value: (LeadRow) -> String?
+    /// Count one already-derived facet dimension, largest first (ties broken by
+    /// label for determinism), capped at `topN` with the tail folded into a neutral
+    /// "Other". Counting FACETS rather than raw columns is what keeps a panel and
+    /// its filter menu telling the same story — both read the same derivation.
+    static func breakdown(
+        _ facets: [LeadFacets], topN: Int, value: (LeadFacets) -> String
     ) -> [Breakdown] {
         var counts: [String: Int] = [:]
-        for lead in leads {
-            let key = value(lead)?.nilIfEmpty ?? "Unknown"
-            counts[key, default: 0] += 1
-        }
+        for facet in facets { counts[value(facet), default: 0] += 1 }
         return topBreakdowns(counts, topN: topN)
     }
 
-    /// Status breakdown from the EXACT full-table stage counts when present
-    /// (a recency window skews a pipeline-stage distribution toward "scraped");
-    /// else a windowed rollup from the fetched leads.
-    private static func statusBreakdown(_ inputs: DashboardInputs) -> [Breakdown] {
-        if !inputs.statusCounts.isEmpty {
-            // uniquingKeysWith (not uniqueKeysWithValues) — two stage tokens that
-            // ever collapse to the same display label must MERGE, never trap.
-            let labeled = Dictionary(inputs.statusCounts.map { (stageLabel($0.key), $0.value) },
-                                     uniquingKeysWith: +)
-            return topBreakdowns(labeled, topN: 8)
-        }
-        return breakdown(inputs.leads, topN: 8) { $0.enrichmentStage }
+    /// Pipeline-stage rollup over the leads currently shown. Counted from the
+    /// snapshot (not the exact per-stage HEAD reads) precisely so it MOVES with the
+    /// filter — a "By status" panel frozen at full-table totals beside a filtered
+    /// list is the mixed view this tab is designed not to produce.
+    static func statusBreakdown(_ leads: [LeadRow]) -> [Breakdown] {
+        var counts: [String: Int] = [:]
+        for lead in leads { counts[stageLabel(lead.enrichmentStage), default: 0] += 1 }
+        return topBreakdowns(counts, topN: 8)
     }
 
     private static func topBreakdowns(_ counts: [String: Int], topN: Int) -> [Breakdown] {

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @State private var model = DashboardViewModel()
+    @State private var searchModel = LeadSearchModel()
     @State private var campaignModel = CampaignDashboardViewModel()
     @State private var pipelineModel = PipelineDashboardViewModel()
     @State private var inspectorModel = LeadInspectorModel()
@@ -38,11 +39,26 @@ struct RootView: View {
                 .environment(pinsModel)
         }
         .background(WindowAccessor { titlebarHover.attach(to: $0) })
-        .task { await model.load() }            // initial Leads load
-        .task { await campaignModel.load() }    // initial Campaigns load
-        .task { await backlogModel.load() }     // initial backlog scan (P6)
-        .task { await pipelinePolling() }       // Pipeline: own loop (fast while a run is live)
-        .task { await periodicRefresh() }       // re-fetch Leads+Campaigns+backlog every 10 min
+        .task { await initialLeadsLoad() }       // initial Leads load
+        // Offline dev mode drives the Leads tab only: every other loop below would
+        // reach for the Keychain and the network, which is the whole point of not
+        // running them.
+        .task { if !LeadsFixtureSource.isRequested { await campaignModel.load() } }
+        .task { if !LeadsFixtureSource.isRequested { await backlogModel.load() } }
+        .task { if !LeadsFixtureSource.isRequested { await pipelinePolling() } }
+        .task { if !LeadsFixtureSource.isRequested { await periodicRefresh() } }
+    }
+
+    /// Normal launch → live fetch. `--fixture` (dev-only) → synthetic book, no
+    /// Keychain and no network, so the REAL window can be driven offline while
+    /// iterating on layout the still harness cannot capture (scroll behaviour).
+    private func initialLeadsLoad() async {
+        if LeadsFixtureSource.isRequested {
+            model.loadFixture()
+            searchModel.fixtureRows = model.snapshotLeads
+        } else {
+            await model.load()
+        }
     }
 
     /// Re-fetch Leads + Campaigns + backlog every 10 minutes while the app is open.
@@ -109,7 +125,8 @@ struct RootView: View {
     }
 
     /// The live ABLeads surface: row tap → shared profile sheet, header refresh →
-    /// live re-fetch, stale banner when a refresh degraded.
+    /// live re-fetch, stale banner when a refresh degraded, filter bar → local
+    /// re-derivation, search box → server query over the whole book.
     private func liveLeads(_ data: ABLeadsData, staleMessage: String?) -> some View {
         ABLeadsView(
             data: data,
@@ -119,7 +136,12 @@ struct RootView: View {
             },
             onRefresh: { Task { await model.load() } },
             isRefreshing: model.isRefreshing,
-            staleMessage: staleMessage
+            staleMessage: staleMessage,
+            onFilterChange: { model.apply($0) },
+            searchQuery: Bindable(searchModel).query,
+            searchState: searchModel.state,
+            onSearchSubmit: { searchModel.submit() },
+            onSearchClear: { searchModel.clear() }
         )
     }
 

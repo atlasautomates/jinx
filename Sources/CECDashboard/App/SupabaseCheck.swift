@@ -34,8 +34,17 @@ enum SupabaseCheck {
                 // Leads-tab KPI/trend reads added with the ABLeads re-skin — both
                 // fail-open, so this probe surfaces an empty/degraded read that the
                 // tab would otherwise absorb silently.
-                async let repliesTask = repo.replyCountResult()
-                async let messagedTask = repo.messagedSendsResult()
+                async let repliesTask = repo.leadIDsResult(table: "replies", filter: nil, maxPages: 1)
+                async let messagedTask = repo.messagedSendsResult(maxPages: 1)
+                // Lane classification (leads-filter): these two columns decide
+                // deep-lane vs standard personalization. A failed read here is why
+                // the tab would hide its Lane menu, so name it explicitly.
+                async let deepTask = repo.leadIDsResult(
+                    table: "lead_enrichment",
+                    filter: URLQueryItem(name: "deep_cohort_run_id", value: "not.is.null"), maxPages: 1)
+                async let personalizedTask = repo.leadIDsResult(
+                    table: "lead_enrichment",
+                    filter: URLQueryItem(name: "personalized_opener", value: "not.is.null"), maxPages: 1)
                 async let runsTask = pipeRepo.recentRuns()
                 async let eventsTask: [PipelineLeadEventRow]? = try? pipeRepo.leadEvents(
                     leadId: "00000000-0000-0000-0000-000000000000") // shape/RLS probe; expect []
@@ -54,8 +63,10 @@ enum SupabaseCheck {
                 let events = await eventsTask
                 let interactionsOK = await interactionsTask
                 let backlogOK = await backlogTask
-                let replyCount = await repliesTask
+                let replied = await repliesTask
                 let messaged = await messagedTask
+                let deep = await deepTask
+                let personalized = await personalizedTask
                 // Stage read depends on run ids — the one sequential follow-up.
                 let (stageRows, stagesOK) = await pipeRepo.stageRuns(
                     runIds: runs.prefix(3).map(\.runId))
@@ -72,13 +83,20 @@ enum SupabaseCheck {
                        : ", lead_interactions read FAILED (missing lead_interactions_anon_read migration?)")
                     + (backlogOK ? ", backlog tables readable"
                        : ", backlog tables UNREADABLE (campaign_leads / v_campaign_ready)")
-                let leadsKpiStr = "leads-kpi: replied-leads=\(replyCount)"
-                    + (replyCount == 0 ? " (EMPTY — no replies / no RLS)" : "")
-                    + ", sent(send_queue ≤13wk)=\(messaged.count) email(s) to \(Set(messaged.map(\.leadID)).count) lead(s)"
+                // First page only (this is a readability probe, not a tally) — so
+                // every count below is a floor, spelled "≥".
+                let leadsKpiStr = "leads-kpi: replied-leads ≥\(replied.ids.count)"
+                    + (replied.ok ? (replied.ids.isEmpty ? " (EMPTY — no replies / no RLS)" : "")
+                                  : " (READ FAILED)")
+                    + ", sent(send_queue ≤13wk) ≥\(messaged.count) email(s) to \(Set(messaged.map(\.leadID)).count) lead(s)"
                     + (messaged.isEmpty ? " (EMPTY — no sends / no RLS on send_queue)" : "")
+                let laneStr = "leads-lane: deep-cohort ≥\(deep.ids.count)"
+                    + (deep.ok ? "" : " (READ FAILED — Lane filter disabled)")
+                    + ", personalized ≥\(personalized.ids.count)"
+                    + (personalized.ok ? "" : " (READ FAILED — Lane filter disabled)")
                 result.message = "reached \(client.baseURL.host ?? "supabase"), "
                     + "\(leadsProbe.count) lead(s) sampled (full select incl. enrichment_stage)"
-                    + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)\n  \(leadsKpiStr)"
+                    + "\n  \(tierStr)\n  \(sentStr)\n  \(pipeStr)\n  \(leadsKpiStr)\n  \(laneStr)"
             } catch {
                 result.message = error.localizedDescription
             }

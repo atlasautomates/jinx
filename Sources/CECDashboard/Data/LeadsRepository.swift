@@ -4,45 +4,68 @@ import Foundation
 struct LeadsRepository {
     let client: SupabaseClient
 
-    /// Everything the Leads tab needs, in one call (parity with
-    /// `CampaignsRepository.fetch` / `PipelineRepository.fetch`): essential reads
-    /// throw and fail the load; supplementary tier/sentiment reads fail open and
-    /// only mark the result `partial`.
+    /// PostgREST caps every response at 1000 rows regardless of `limit`, so every
+    /// full-set read here PAGES. The cap exists only as a runaway guard — hitting
+    /// it is a truthfulness event (`leadsComplete: false`), never a silent floor.
+    static let pageSize = 1000
+    static let maxPages = 25          // 25k leads before the snapshot degrades
+
+    /// Everything the Leads tab needs, in one call.
+    ///
+    /// The snapshot is the WHOLE lead table (paged), not a recency window: the tab
+    /// now filters by lane/region/source/industry, and every headline number is
+    /// recomputed from the filtered subset. A windowed snapshot would make each of
+    /// those numbers a sample masquerading as a total — the exact-count HEAD reads
+    /// that used to backstop the unfiltered totals cannot be issued per filter
+    /// combination. So: fetch the book once, derive everything locally, and say so
+    /// out loud (`leadsComplete`) if paging ever hits the cap.
+    ///
+    /// Essential reads (leads, total count) throw and fail the load; every
+    /// supplementary read fails OPEN and only marks the result `partial`.
     func fetch() async throws -> DashboardInputs {
-        async let leads = recentLeads()
-        async let tiers = tierCountsResult()
-        async let sentiment = sentimentCountsResult()
-        async let replies = replyCountResult()
+        async let leadPage = allLeads()
+        async let deep = leadIDsResult(table: "lead_enrichment",
+                                       filter: URLQueryItem(name: "deep_cohort_run_id", value: "not.is.null"))
+        async let personalized = leadIDsResult(table: "lead_enrichment",
+                                               filter: URLQueryItem(name: "personalized_opener", value: "not.is.null"))
+        async let replied = leadIDsResult(table: "replies", filter: nil)
         async let messaged = messagedSendsResult()
-        let total = try await totalCount()   // statusCounts derives its residual from the exact total
-        async let status = statusCountsResult(totalCount: total)
-        return try await Self.compose(
-            leads: leads, totalCount: total,
-            tiers: await tiers, sentiment: await sentiment,
-            status: await status,
-            replyCount: await replies, messagedSends: await messaged)
+        let total = try await totalCount()
+        let page = try await leadPage
+        return Self.compose(
+            leads: page.rows, totalCount: total, leadsComplete: page.complete,
+            deep: await deep, personalized: await personalized, replied: await replied,
+            messagedSends: await messaged)
     }
 
     /// Pure packaging seam (selftest target): supplementary results carry an `ok`
     /// flag so a FAILED read (partial) is distinguishable from an EMPTY table.
-    /// A failed STATUS read deliberately does NOT ride `partial`: the builder falls
-    /// back to the windowed rollup with its own honest "(latest N of M)" title, so
-    /// the board never vanishes and never silently lies.
+    ///
+    /// A failed lane read is louder than a failed tier read was: with `deep` and
+    /// `personalized` empty, every lead would classify as "Not personalized" —
+    /// a WRONG answer rather than a missing widget. So a failed lane read sets
+    /// `lanesDegraded` on top of `partial`, and the filter bar refuses to offer a
+    /// lane dimension it cannot compute.
+    ///
+    /// `leadsComplete` is ANDed with the row count vs. the exact table total: a
+    /// clean page walk that still came back short of `totalCount` (rows written
+    /// mid-walk, an RLS-invisible row) is not a complete snapshot either.
     static func compose(
-        leads: [LeadRow], totalCount: Int,
-        tiers: (counts: [String: Int], ok: Bool),
-        sentiment: (counts: [String: Int], ok: Bool),
-        status: (counts: [String: Int], ok: Bool) = ([:], ok: false),
-        replyCount: Int = 0,
+        leads: [LeadRow], totalCount: Int, leadsComplete: Bool,
+        deep: (ids: Set<String>, ok: Bool) = ([], true),
+        personalized: (ids: Set<String>, ok: Bool) = ([], true),
+        replied: (ids: Set<String>, ok: Bool) = ([], true),
         messagedSends: [DashboardInputs.SentEvent] = []
     ) -> DashboardInputs {
-        DashboardInputs(leads: leads, totalCount: totalCount,
-                        tierCounts: tiers.counts,
-                        sentimentCounts: sentiment.counts,
-                        statusCounts: status.ok ? status.counts : [:],
-                        partial: !tiers.ok || !sentiment.ok,
-                        replyCount: replyCount,
-                        messagedSends: messagedSends)
+        DashboardInputs(
+            leads: leads, totalCount: totalCount,
+            leadsComplete: leadsComplete && leads.count >= totalCount,
+            deepLaneLeadIDs: deep.ids,
+            personalizedLeadIDs: personalized.ids,
+            repliedLeadIDs: replied.ids,
+            lanesDegraded: !deep.ok || !personalized.ok,
+            partial: !deep.ok || !personalized.ok || !replied.ok,
+            messagedSends: messagedSends)
     }
 
     /// Exact total number of leads in the table.
@@ -50,16 +73,119 @@ struct LeadsRepository {
         try await client.count("leads")
     }
 
-    /// Most recently added leads.
+    /// The whole lead table, newest first, paged.
+    ///
+    /// Ordered by `(created_at desc, id desc)` — a TOTAL order. Paging on
+    /// `created_at` alone is not stable: the hundreds of leads one scrape writes
+    /// share a timestamp, and PostgREST may return those ties in a different order
+    /// per page, which silently duplicates some rows and drops others across a page
+    /// boundary. `id` breaks every tie.
+    ///
+    /// `complete` is false when the page cap was hit — callers must then stop
+    /// presenting derived figures as full-table totals.
+    func allLeads(pageSize: Int = LeadsRepository.pageSize,
+                  maxPages: Int = LeadsRepository.maxPages) async throws -> (rows: [LeadRow], complete: Bool) {
+        var rows: [LeadRow] = []
+        let size = max(1, pageSize)
+        for _ in 0..<max(1, maxPages) {
+            let data = try await client.get("leads", [
+                URLQueryItem(name: "select", value: Self.leadColumns),
+                URLQueryItem(name: "order", value: "created_at.desc,id.desc"),
+                URLQueryItem(name: "limit", value: String(size)),
+                URLQueryItem(name: "offset", value: String(rows.count)),
+            ])
+            let page = try JSONDecoder().decode([LeadRow].self, from: data)
+            rows.append(contentsOf: page)
+            // Terminate on an EMPTY page, not a short one: the server's own row cap
+            // can sit below ours, and a short page would then read as "that's the
+            // whole table" while leaving rows behind.
+            if page.isEmpty { return (rows, true) }
+        }
+        return (rows, false)
+    }
+
+    /// Columns every lead read selects. `location`/`country` are region inputs
+    /// (see `RegionKey`); dropping one silently collapses a region bucket.
+    static let leadColumns =
+        "id,company_name,first_name,industry,lead_source,city,state,location,country,created_at,enrichment_stage"
+
+    /// Most recently added leads — the voice/`--query` surfaces want a window
+    /// rather than the whole book.
     func recentLeads(limit: Int = 1000) async throws -> [LeadRow] {
         let data = try await client.get("leads", [
-            URLQueryItem(name: "select",
-                         value: "id,company_name,first_name,industry,lead_source,city,state,created_at,enrichment_stage"),
+            URLQueryItem(name: "select", value: Self.leadColumns),
             URLQueryItem(name: "order", value: "created_at.desc"),
             URLQueryItem(name: "limit", value: String(max(1, limit))),
         ])
         return try JSONDecoder().decode([LeadRow].self, from: data)
     }
+
+    // MARK: - Search
+
+    /// Longest term we will send. Long enough for any real company name, short
+    /// enough that a paste-bomb can't build a pathological ILIKE.
+    static let searchTermLimit = 64
+    /// Below this, `ilike *x*` matches a large share of the book — the result list
+    /// is noise and the scan is expensive for nothing.
+    static let searchMinLength = 2
+    static let searchResultLimit = 60
+
+    /// Sanitize a raw search-box value into something safe to interpolate into a
+    /// PostgREST `or=(…)` filter. nil = don't search (empty / too short).
+    ///
+    /// This is a filter-GRAMMAR sanitizer and it is the whole security story for
+    /// the feature. `or=(a.ilike.*x*,b.ilike.*x*)` is parsed positionally: a comma
+    /// in the value starts a new predicate, a parenthesis closes the group, and a
+    /// backslash escapes the next character — so an unfiltered term can rewrite the
+    /// query into one selecting rows it was never meant to return. `%` is a LIKE
+    /// metacharacter that matches everything (turning any search into a full table
+    /// dump) and `*` is PostgREST's own wildcard spelling, which we supply
+    /// ourselves. Every one of those is DROPPED rather than escaped: an escape has
+    /// to survive two layers of decoding to stay correct, a deletion does not.
+    ///
+    /// `_` (LIKE's single-character wildcard) is deliberately KEPT: it can only
+    /// widen a match, and stripping it would break the literal search for a name
+    /// that actually contains one.
+    static func searchTerm(_ raw: String) -> String? {
+        let denied: Set<Character> = [",", "(", ")", "*", "%", "\\", "\""]
+        let mapped = String(raw.prefix(searchTermLimit * 8)).map { ch -> Character in
+            if ch.isNewline || ch == "\t" { return " " }
+            return denied.contains(ch) ? " " : ch
+        }
+        let stripped = String(mapped).unicodeScalars
+            .filter { !CharacterSet.controlCharacters.contains($0) }
+        let collapsed = String(String.UnicodeScalarView(stripped))
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+        let capped = String(collapsed.prefix(searchTermLimit))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return capped.count >= searchMinLength ? capped : nil
+    }
+
+    /// The `or=` filter value for one sanitized term. Split out so the selftest can
+    /// pin the exact grammar without a network call.
+    static func searchFilter(_ term: String) -> String {
+        let columns = ["company_name", "full_name", "first_name", "last_name", "email"]
+        return "(" + columns.map { "\($0).ilike.*\(term)*" }.joined(separator: ",") + ")"
+    }
+
+    /// Server-side lead search by company OR person name (also email), newest
+    /// first. THROWS on transport/HTTP failure: a search is a foreground action the
+    /// user just took, so it must report rather than fail open to an empty list
+    /// that reads as "no such lead".
+    func search(_ rawTerm: String,
+                limit: Int = LeadsRepository.searchResultLimit) async throws -> [LeadRow] {
+        guard let term = Self.searchTerm(rawTerm) else { return [] }
+        let data = try await client.get("leads", [
+            URLQueryItem(name: "select", value: Self.leadColumns + ",last_name,email"),
+            URLQueryItem(name: "or", value: Self.searchFilter(term)),
+            URLQueryItem(name: "order", value: "created_at.desc,id.desc"),
+            URLQueryItem(name: "limit", value: String(max(1, limit))),
+        ])
+        return try JSONDecoder().decode([LeadRow].self, from: data)
+    }
+
+    // MARK: - Supplementary reads
 
     /// Counts of `lead_enrichment.lead_tier`. Fail-open (`ok: false` marks partial),
     /// so a supplementary widget never fails the dashboard load.
@@ -72,47 +198,109 @@ struct LeadsRepository {
         await columnCounts(table: "replies", column: "sentiment")
     }
 
-    /// DISTINCT count of leads that replied (`replies.lead_id`, deduped via the paged
-    /// tally — same lead grain as the campaigned-stage "emailed" count, so the
-    /// reply-rate ratio is leads/leads and can't exceed 100% on multi-reply threads).
-    /// Supplementary → fail-open to 0 (an unreadable `replies` table degrades the KPI
-    /// to 0, never fails the load).
-    func replyCountResult() async -> Int {
-        await columnCounts(table: "replies", column: "lead_id").counts.count
+    /// The DISTINCT set of `lead_id`s in `table` matching `filter` (nil = every
+    /// row), paged. Backs the lane classification (deep-lane / personalized) and
+    /// the replied set, so the tab can answer "which of THESE leads replied?" under
+    /// any filter instead of only reporting the global tally.
+    ///
+    /// Fail-open: any error yields `ok: false` with whatever was read, and the
+    /// caller marks the load partial (and, for lanes, degraded).
+    func leadIDsResult(table: String, filter: URLQueryItem?,
+                       pageSize: Int = LeadsRepository.pageSize,
+                       maxPages: Int = LeadsRepository.maxPages) async -> (ids: Set<String>, ok: Bool) {
+        var ids = Set<String>()
+        var offset = 0
+        let size = max(1, pageSize)
+        do {
+            for _ in 0..<max(1, maxPages) {
+                var items = [
+                    URLQueryItem(name: "select", value: "lead_id"),
+                    URLQueryItem(name: "order", value: "lead_id"),
+                    URLQueryItem(name: "limit", value: String(size)),
+                    URLQueryItem(name: "offset", value: String(offset)),
+                ]
+                if let filter { items.append(filter) }
+                let data = try await client.get(table, items)
+                guard let page = Self.leadIDs(data) else {
+                    NSLog("LeadsRepository: \(table).lead_id page at offset \(offset) unparseable; marking partial")
+                    return (ids, false)
+                }
+                if page.rows == 0 { return (ids, true) }
+                ids.formUnion(page.ids)
+                offset += page.rows
+            }
+            return (ids, false)   // page cap hit → the set is a floor, not the truth
+        } catch {
+            NSLog("LeadsRepository: \(table).lead_id read failed (\(error.localizedDescription)); treating as empty+partial")
+            return (ids, false)
+        }
+    }
+
+    /// Pure parse of one `select=lead_id` page (selftest target). nil = the body
+    /// wasn't the expected JSON array, which is a FAILED read, never an empty one.
+    /// `rows` counts every row returned (including null/blank ids) so paging
+    /// advances by what the server actually sent — advancing by usable ids alone
+    /// would re-request the same offset forever if a page were all nulls.
+    static func leadIDs(_ data: Data) -> (ids: Set<String>, rows: Int)? {
+        guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return nil
+        }
+        var ids = Set<String>()
+        for row in rows {
+            guard let raw = row["lead_id"] as? String else { continue }
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty { ids.insert(id) }
+        }
+        return (ids, rows.count)
     }
 
     /// SENT emails over the last `weeks` weeks (`send_queue`, `status=sent`), each
-    /// carrying its `lead_id` so the trend can count DISTINCT leads messaged per week
-    /// rather than send steps. Newest first, so a >1000-row window keeps the most
-    /// recent weeks (the right edge of the trend) complete. Supplementary →
-    /// fail-open to empty (the trend then renders as an empty series, guarded
-    /// downstream). NOTE: the cutoff is emitted by a plain `ISO8601DateFormatter`
-    /// (default GMT, `…Z` suffix, no `+`), which `URLComponents` passes through
-    /// unmangled — do not switch it to a `+00:00` form or the `gte` filter breaks.
-    func messagedSendsResult(weeks: Int = 13, limit: Int = 1000) async -> [DashboardInputs.SentEvent] {
+    /// carrying its `lead_id` so the trend can count DISTINCT leads messaged per
+    /// week rather than send steps — and so it can be narrowed to a filtered lead
+    /// set. Newest first and PAGED: a single 1000-row read clips the oldest weeks of
+    /// the window as soon as the send log passes 1000 rows in 13 weeks.
+    /// Supplementary → fails open to whatever was read. NOTE: the cutoff is emitted
+    /// by a plain `ISO8601DateFormatter` (default GMT, `…Z` suffix, no `+`), which
+    /// `URLComponents` passes through unmangled — do not switch it to a `+00:00`
+    /// form or the `gte` filter breaks.
+    func messagedSendsResult(weeks: Int = 13,
+                             pageSize: Int = LeadsRepository.pageSize,
+                             maxPages: Int = LeadsRepository.maxPages) async -> [DashboardInputs.SentEvent] {
         var cal = Calendar(identifier: .iso8601)
         cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
         let cutoff = cal.date(byAdding: .weekOfYear, value: -max(1, weeks), to: Date()) ?? Date.distantPast
         let cutoffStr = ISO8601DateFormatter().string(from: cutoff)
+        var events: [DashboardInputs.SentEvent] = []
+        var offset = 0
+        let size = max(1, pageSize)
         do {
-            let data = try await client.get("send_queue", [
-                URLQueryItem(name: "select", value: "lead_id,sent_at"),
-                URLQueryItem(name: "status", value: "eq.sent"),
-                URLQueryItem(name: "sent_at", value: "gte.\(cutoffStr)"),
-                URLQueryItem(name: "order", value: "sent_at.desc"),
-                URLQueryItem(name: "limit", value: String(max(1, limit))),
-            ])
-            guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-                return []
+            for _ in 0..<max(1, maxPages) {
+                let data = try await client.get("send_queue", [
+                    URLQueryItem(name: "select", value: "lead_id,sent_at"),
+                    URLQueryItem(name: "status", value: "eq.sent"),
+                    URLQueryItem(name: "sent_at", value: "gte.\(cutoffStr)"),
+                    URLQueryItem(name: "order", value: "sent_at.desc,id.desc"),
+                    URLQueryItem(name: "limit", value: String(size)),
+                    URLQueryItem(name: "offset", value: String(offset)),
+                ])
+                guard let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                    NSLog("LeadsRepository: send_queue page unparseable; messaged trend truncated")
+                    return events
+                }
+                if rows.isEmpty { return events }
+                events.append(contentsOf: rows.compactMap { row in
+                    guard let lead = row["lead_id"] as? String,
+                          let sent = row["sent_at"] as? String else { return nil }
+                    return DashboardInputs.SentEvent(leadID: lead, sentAt: sent)
+                })
+                // Advance by rows RETURNED, not by events kept — a row with a null
+                // lead_id must still move the offset or the walk never terminates.
+                offset += rows.count
             }
-            return rows.compactMap { row in
-                guard let lead = row["lead_id"] as? String,
-                      let sent = row["sent_at"] as? String else { return nil }
-                return DashboardInputs.SentEvent(leadID: lead, sentAt: sent)
-            }
+            return events
         } catch {
             NSLog("LeadsRepository: send_queue read failed (\(error.localizedDescription)); messaged trend omitted")
-            return []
+            return events
         }
     }
 
@@ -121,14 +309,10 @@ struct LeadsRepository {
     static let knownStages = ["scraped", "researched", "personalized", "campaigned"]
 
     /// EXACT full-table counts per `enrichment_stage`, via one filtered `count=exact`
-    /// HEAD request per stage plus a NULL count — deliberately NOT `columnCounts`
-    /// paging: `leads` is the big table, and the 20k page cap would silently floor a
-    /// stage tally there. A recency-windowed stage distribution is systematically
-    /// skewed (new leads cluster at "scraped"), so exact counts are what make this
-    /// board a truthful funnel. Fail-open: on any error the builder falls back to
-    /// the windowed rollup. Any residual vs. the exact total (a value outside the
-    /// known set — shouldn't exist given the trigger) folds into the "unknown"
-    /// bucket rather than being invented as its own label.
+    /// HEAD request per stage plus a NULL count. Retained for the voice/`--query`
+    /// surfaces and `DashboardBuilder`; the Leads tab derives its stage counts from
+    /// the snapshot instead (the same number when the snapshot is complete, and
+    /// honestly labelled when it isn't). Fail-open.
     func statusCountsResult(totalCount: Int) async -> (counts: [String: Int], ok: Bool) {
         do {
             var counts: [String: Int] = [:]

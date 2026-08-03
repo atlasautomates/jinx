@@ -96,6 +96,8 @@ private struct ABBreakdownRow: View {
 
 struct ABBreakdownRowGroup: View {
     let data: ABLeadsData
+    /// Offscreen render can't capture ScrollView content — clip instead.
+    var staticRender: Bool = false
     var forcedHoverStatusLabel: String? = nil
 
     private func statusColor(_ label: String) -> Color {
@@ -107,17 +109,33 @@ struct ABBreakdownRowGroup: View {
         }
     }
 
-    var body: some View {
-        // VARIANT C: stacked vertically in the narrow side column (Arm A layout).
-        // Source/industry are windowed over the fetched leads → carry the "N of M"
-        // scope note; byStatus uses EXACT full-table counts → no note.
+    /// VARIANT C: stacked vertically in the narrow side column (Arm A layout).
+    /// Every panel counts the SAME filtered lead set the list and the hero use, so
+    /// the scope note (when the snapshot itself is a window) applies to all four.
+    @ViewBuilder
+    private var panels: some View {
         VStack(alignment: .leading, spacing: DesignTokens.space2) {
             ABBreakdownPanel(title: "By source", items: data.bySource,
+                             scopeNote: data.breakdownScopeNote)
+            ABBreakdownPanel(title: "By region", items: data.byRegion,
                              scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By industry", items: data.byIndustry,
                              scopeNote: data.breakdownScopeNote)
             ABBreakdownPanel(title: "By status", items: data.byStatus,
-                             colorFor: statusColor, forcedHoverLabel: forcedHoverStatusLabel)
+                             colorFor: statusColor,
+                             forcedHoverLabel: forcedHoverStatusLabel,
+                             scopeNote: data.breakdownScopeNote)
+        }
+    }
+
+    var body: some View {
+        // Own scroll surface, bounded by the band's height (the page does not
+        // scroll) — four panels no longer have to fit a short window.
+        if staticRender {
+            panels.frame(maxHeight: .infinity, alignment: .top).clipped()
+        } else {
+            ScrollView { panels }
+                .scrollBounceBehavior(.basedOnSize)
         }
     }
 }
