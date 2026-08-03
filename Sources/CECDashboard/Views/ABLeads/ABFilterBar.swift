@@ -9,15 +9,16 @@ import SwiftUI
 
 struct ABFilterBar: View {
     let data: ABLeadsData
-    /// True while search results own the list column.
-    ///
-    /// The pills stay LIT. An earlier cut dimmed them here on the grounds that a lit
-    /// pill would assert a scope over rows it doesn't govern — but search replaces
-    /// only the list; the heroes, both trends and all four breakdowns below are still
-    /// filtered. Dimming told the user the lens was off while most of the screen was
-    /// still under it. The disclaimer belongs on the panel that actually ignores the
-    /// filters, and it lives there ("whole lead book · filters not applied").
-    var searching: Bool = false
+    // NOTE: this bar deliberately takes no `searching` flag. An earlier cut dimmed
+    // the pills during a search on the grounds that a lit pill asserts a scope over
+    // rows it doesn't govern — but search replaces only the LIST; the heroes, both
+    // trends and all four breakdowns stay filtered. Dimming told the user the lens
+    // was off while most of the screen was still under it. The disclaimer belongs on
+    // the panel that actually ignores the filters, and it lives there.
+    /// The lens the USER asked for — what the menus SHOW and edit. Supplied by the
+    /// view model, which owns it; deliberately not carried on `data`, so a view
+    /// making a claim about the rows cannot reach it by accident.
+    var requestedFilter: LeadFilter = .all
     /// Called with the new filter whenever a menu changes. The view model owns the
     /// value — this view never mutates it locally, so what the bar draws and what
     /// the numbers were computed from cannot drift.
@@ -27,7 +28,7 @@ struct ABFilterBar: View {
     /// The bar edits the REQUESTED filter, never the effective one: when a
     /// dimension is suppressed (degraded lane reads), editing the effective value
     /// would write the suppression back and permanently discard the user's pick.
-    private var filter: LeadFilter { data.filter }
+    private var filter: LeadFilter { requestedFilter }
 
     var body: some View {
         HStack(spacing: DesignTokens.space2) {

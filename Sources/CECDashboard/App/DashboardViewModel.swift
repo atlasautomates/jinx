@@ -36,6 +36,18 @@ final class DashboardViewModel {
     /// on the main actor, per menu pick).
     private var snapshot: LeadSnapshot?
 
+    /// Where a load gets its data. Injectable ONLY so `--selftest` can drive the
+    /// real `load()` — its failure, cancellation and reentrancy branches were
+    /// unreachable while this hard-called `SupabaseClient.make()`, which is how a
+    /// reported-and-fixed defect (the freshness stamp advancing on a failed load)
+    /// could be reinstated verbatim and still pass a green suite.
+    typealias Fetcher = @Sendable () async throws -> DashboardInputs
+    private let fetcher: Fetcher
+
+    init(fetcher: @escaping Fetcher = DashboardViewModel.liveFetch) {
+        self.fetcher = fetcher
+    }
+
     /// Dev-only offline load: the same map/filter path over a synthetic book, so the
     /// LIVE window can be driven without Keychain or network. Debug builds only —
     /// see `LeadsFixtureSource`.
@@ -65,7 +77,7 @@ final class DashboardViewModel {
         if state.value == nil { state = .loading }
 
         do {
-            let inputs = try await Self.fetchInputs()
+            let inputs = try await fetcher()
             let snap = LeadSnapshot(inputs)
             snapshot = snap
             loadedAt = Date()          // success only — see the property's note
@@ -89,13 +101,13 @@ final class DashboardViewModel {
         }
     }
 
-    /// The network side of `load()`, hoisted out of the main actor.
+    /// The production fetch, hoisted out of the main actor.
     ///
     /// `nonisolated` is load-bearing: an unstructured `Task {}` created inside a
     /// `@MainActor` type INHERITS that isolation (SE-0304), so building the client
     /// inline ran `SecItemCopyMatching` — a synchronous Security-framework call that
     /// can block, and can prompt — on the main thread.
-    private nonisolated static func fetchInputs() async throws -> DashboardInputs {
+    @Sendable nonisolated static func liveFetch() async throws -> DashboardInputs {
         let client = try SupabaseClient.make()
         return try await LeadsRepository(client: client).fetch()
     }

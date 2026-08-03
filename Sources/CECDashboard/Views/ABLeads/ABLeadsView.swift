@@ -30,6 +30,9 @@ struct ABLeadsView: View {
     /// states the numbers' age, and the poll loop is a plain sleep — a lid opened
     /// after a weekend otherwise reads as current.
     var loadedAt: Date? = nil
+    /// The lens the user asked for — drives what the MENUS show. Separate from
+    /// `data.effectiveFilter`, which is what the rows actually are.
+    var requestedFilter: LeadFilter = .all
     /// Filter changes (live tab). nil = the bar is inert (fixture/harness path).
     var onFilterChange: ((LeadFilter) -> Void)? = nil
     /// Search box binding + actions. nil = no search box (fixture/harness path,
@@ -73,7 +76,7 @@ struct ABLeadsView: View {
             if let fixtureNotice { ABFixtureBanner(message: fixtureNotice) }
             if let staleMessage { ABStaleBanner(message: staleMessage) }
             header
-            ABFilterBar(data: data, searching: searching,
+            ABFilterBar(data: data, requestedFilter: requestedFilter,
                         onChange: onFilterChange ?? { _ in })                 // lens
             ABKpiHeroRow(data: data, forcedPressedHero: interactionDemo)       // level 1
             ABTrendRow(data: data)                                            // level 2
@@ -116,7 +119,7 @@ struct ABLeadsView: View {
             // that makes a claim about the rows reads `effectiveFilter`.
             ABRecentLeadsTable(leads: data.recentLeads,
                                matchingCount: data.matchingCount,
-                               filterSummary: data.effectiveFilter.summary,
+                               filterSummary: data.listCaption,
                                forcedHoverIndex: interactionDemo ? 1 : nil,
                                staticRender: staticRender,
                                onSelect: onSelectLead)

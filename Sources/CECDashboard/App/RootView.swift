@@ -211,6 +211,7 @@ struct RootView: View {
             staleMessage: staleMessage,
             fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
             loadedAt: fixture ? nil : model.loadedAt,
+            requestedFilter: model.filter,
             onFilterChange: { model.apply($0) },
             searchQuery: Bindable(searchModel).query,
             searchState: searchModel.state,

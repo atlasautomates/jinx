@@ -44,12 +44,16 @@ struct ABLeadsData: Sendable {
     /// DISTINCT leads messaged across the whole trend window (the per-week series
     /// sums to lead-WEEKS, which overstates leads reached).
     var leadsMessagedTotal: Int = 0
-    /// The lens the USER asked for. The filter bar edits this, so a dimension the
-    /// derivation had to suppress this pass (see `effectiveFilter`) is never
-    /// silently discarded from their selection.
-    var filter: LeadFilter = .all
-    /// The lens actually applied. Differs from `filter` only when a dimension
-    /// couldn't be computed — today, the lane, when its reads failed.
+    /// The lens that was APPLIED — the only filter this type carries.
+    ///
+    /// Three consecutive review rounds found the same defect: a view asserting
+    /// something about the rows while reading the filter the user *requested*, which
+    /// titled the panel "Filtered leads · Deep lane" over the whole unfiltered book
+    /// when a lane read failed and the dimension was suppressed. Asserting the right
+    /// read in a test did not stop it recurring — so the requested filter is no
+    /// longer reachable from here at all. A view that wants it takes it as its own
+    /// parameter, from the view model, which is the only thing that legitimately
+    /// edits it (`ABLeadsView.requestedFilter` → `ABFilterBar`).
     var effectiveFilter: LeadFilter = .all
     /// Menu contents for the filter bar, counted over the current lead set.
     var facets: FilterFacets = FilterFacets()
@@ -63,6 +67,13 @@ struct ABLeadsData: Sendable {
     /// Which reads degraded, named, so the UI can say what is understated rather
     /// than rendering a confident zero. Empty when the load was clean.
     var degradedReads: [String] = []
+
+    /// The caption the lead list puts beside its count — derived HERE, from the
+    /// applied filter, so the view has one obvious thing to render and the string is
+    /// pinnable without a render. (The view still has to call this rather than
+    /// building its own; what it CANNOT do any more is reach for the requested
+    /// filter, which this type no longer carries.)
+    var listCaption: String? { effectiveFilter.summary }
 
     /// Rows the recent-leads list renders at most. The list is lazy, but every row
     /// is an interactive, hoverable view — past a few hundred the scroll cost is
@@ -246,7 +257,6 @@ extension ABLeadsData {
         let emailed = emailedIDs.count
         let replies = inputs.repliedLeadIDs.intersection(emailedIDs).count
 
-        self.filter = filter
         self.effectiveFilter = effective
         self.laneFilterAvailable = !inputs.lanesDegraded
         self.partial = inputs.partial

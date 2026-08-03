@@ -392,11 +392,56 @@ enum SelfTest {
         if vm.loadedAt != firstStamp {
             problems.append("vm: a filter change must not advance the freshness stamp")
         }
-        if vm.state.value?.filter.source != "sales-nav" {
+        if vm.state.value?.effectiveFilter.source != "sales-nav" {
             problems.append("vm: apply() must re-derive through the new filter")
         }
         if vm.state.value?.matchingCount == vm.state.value.map({ _ in 0 }) {
             problems.append("vm: filtered snapshot should still match some leads")
+        }
+
+        // The LIVE load path, driven through an injected fetcher — its failure and
+        // cancellation branches were unreachable before, which is how the exact
+        // defect reported in round 1 (the stamp advancing on a failed load) could be
+        // reinstated verbatim and still pass.
+        struct StubError: Error {}
+        let inputs = LeadsFixtureSource.inputs(now: abNow)
+
+        let failing = DashboardViewModel(fetcher: { throw StubError() })
+        _ = runMain { await failing.load() }
+        if failing.loadedAt != nil {
+            problems.append("vm: a FAILED load must not stamp loadedAt")
+        }
+        if failing.state.value != nil { problems.append("vm: a failed first load has no data") }
+
+        let ok = DashboardViewModel(fetcher: { inputs })
+        _ = runMain { await ok.load() }
+        guard let liveStamp = ok.loadedAt else {
+            problems.append("vm: a successful live load must stamp loadedAt")
+            return problems
+        }
+        // …and a LATER failure must leave the stamp AND the data alone, showing the
+        // stale banner over the numbers the stamp actually describes. A model whose
+        // fetch succeeds once and fails after:
+        let flakyBox = FlakyFetcher(inputs: inputs)
+        let flaky = DashboardViewModel(fetcher: { try flakyBox.next() })
+        _ = runMain { await flaky.load() }
+        let firstLive = flaky.loadedAt
+        flakyBox.failFromNowOn()
+        _ = runMain { await flaky.load() }
+        if flaky.loadedAt != firstLive {
+            problems.append("vm: a FAILED refresh must not advance the stamp over unchanged data")
+        }
+        if flaky.state.staleMessage == nil {
+            problems.append("vm: a failed refresh with prior data must degrade to .stale, not .failed")
+        }
+        _ = liveStamp
+
+        // Cancellation is not a failure: no stale banner, no stamp, no error state.
+        let cancelled = DashboardViewModel(fetcher: { throw CancellationError() })
+        _ = runMain { await cancelled.load() }
+        if cancelled.loadedAt != nil { problems.append("vm: a cancelled load must not stamp") }
+        if case .failed = cancelled.state {
+            problems.append("vm: a cancelled load must not paint an error — that reports teardown as a fault")
         }
 
         // Search: a term below the minimum dismisses the RESULTS and keeps the text.
@@ -523,6 +568,57 @@ enum SelfTest {
         if errIDs?.ok != false || errIDs?.ids.isEmpty != true {
             problems.append("walk: a 401 must degrade, not return a confident empty set")
         }
+
+        // The page CAP on the two supplementary walks. `allLeads` was pinned and
+        // these two — one call site over — were not, which is the "list short by
+        // one" tell: the cap means the set is a FLOOR, so it must report ok:false.
+        let endless = LeadsRepository(client: client({ req in
+            let table = req.url?.path.split(separator: "/").last ?? ""
+            if table == "send_queue" {
+                return .init(body: #"[{"id":"\#(UUID().uuidString)","lead_id":"L","sent_at":"2026-07-20T00:00:00+00:00"}]"#)
+            }
+            return .init(body: #"[{"id":"\#(UUID().uuidString)","lead_id":"L"}]"#)
+        }))
+        if runAsyncValue({ await endless.leadIDsResult(table: "replies", filter: nil,
+                                                       pageSize: 1, maxPages: 2) })?.ok != false {
+            problems.append("walk: leadIDsResult hitting the page cap must report ok:false (a floor, not the truth)")
+        }
+        if runAsyncValue({ await endless.messagedSendsResult(pageSize: 1, maxPages: 2) })?.ok != false {
+            problems.append("walk: messagedSendsResult hitting the page cap must report ok:false")
+        }
+        // A non-empty page with NO usable cursor cannot be walked past — degrade
+        // rather than silently return a prefix.
+        let noCursor = LeadsRepository(client: client({ _ in .init(body: #"[{"lead_id":"L"}]"#) }))
+        if runAsyncValue({ await noCursor.leadIDsResult(table: "replies", filter: nil,
+                                                        pageSize: 2, maxPages: 3) })?.ok != false {
+            problems.append("walk: a page with no cursor must report ok:false, not a silent prefix")
+        }
+
+        // `columnCounts` — the LAST offset pager, converted this round and skipped by
+        // the walk tests. Its failure mode is wrong NUMBERS: without a cursor every
+        // page re-reads page 1 and the tally multiplies by the page cap. It feeds the
+        // `--query` / App Intents voice answers.
+        // The stub answers by CURSOR, not by a call counter. Keying on a counter
+        // makes this test blind to the exact defect it is here for: a walk that
+        // never advances its cursor re-requests page 1 forever, and a counter-keyed
+        // stub hands it page 2 anyway. (Caught by mutation — this assertion passed
+        // against a broken walk until the stub was rewritten.)
+        let tierRepo = LeadsRepository(client: client({ req in
+            let cursor = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "id" }?.value
+            switch cursor {
+            case nil:      return .init(body: #"[{"id":"1","lead_tier":"A"},{"id":"2","lead_tier":"B"}]"#)
+            case "gt.2":   return .init(body: #"[{"id":"3","lead_tier":"A"}]"#)
+            default:       return .init(body: "[]")
+            }
+        }))
+        let tiers = runAsyncValue { await tierRepo.tierCountsResult() }
+        if tiers?.counts != ["A": 2, "B": 1] {
+            problems.append("walk: columnCounts must tally ACROSS pages exactly once "
+                + "(got \(tiers?.counts.description ?? "nil")) — a missing cursor advance "
+                + "multiplies every count by the page cap")
+        }
+        if tiers?.ok != true { problems.append("walk: a clean columnCounts walk is ok") }
         return problems
     }
 
@@ -534,22 +630,64 @@ enum SelfTest {
     }
 
     /// Run an async throwing call to completion from the synchronous selftest.
+    ///
+    /// Pumps the run loop rather than blocking on a semaphore. `SelfTest` is
+    /// `@MainActor` and runs pre-boot ON the main thread, so a semaphore wait blocks
+    /// the main actor — and any body that needs the main actor then deadlocks until
+    /// the timeout (measured: 22.3 s, returning a false failure). That is exactly
+    /// what a `@MainActor` view model is, i.e. precisely the code whose state machine
+    /// went untested. Pumping lets main-actor work run while we wait.
     private static func runAsync<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
         let box = ResultBox<T>()
-        let semaphore = DispatchSemaphore(value: 0)
-        Task.detached {
-            do { box.value = .success(try await body()) } catch { box.value = .failure(error) }
-            semaphore.signal()
+        Task {
+            do { box.set(.success(try await body())) } catch { box.set(.failure(error)) }
         }
-        _ = semaphore.wait(timeout: .now() + 20)
-        return box.value ?? .failure(CancellationError())
+        let deadline = Date().addingTimeInterval(20)
+        while box.get() == nil && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        return box.get() ?? .failure(CancellationError())
+    }
+
+    /// Same, for a `@MainActor` body (view models). Kept separate so the isolation
+    /// is explicit at the call site rather than inferred.
+    private static func runMain<T: Sendable>(_ body: @escaping @MainActor () async -> T) -> T? {
+        let box = ResultBox<T>()
+        Task { @MainActor in box.set(.success(await body())) }
+        let deadline = Date().addingTimeInterval(20)
+        while box.get() == nil && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        return try? box.get()?.get()
     }
 
     private static func runAsyncValue<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T? {
         try? runAsync { await body() }.get()
     }
 
-    private final class ResultBox<T>: @unchecked Sendable { var value: Result<T, Error>? }
+    /// Locked: on the timeout path the waiting thread reads while the task may still
+    /// be writing, which is a live data race however unlikely it is to bite.
+    private final class ResultBox<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Result<T, Error>?
+        func set(_ v: Result<T, Error>) { lock.lock(); value = v; lock.unlock() }
+        func get() -> Result<T, Error>? { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// Succeeds until told otherwise — models the refresh that works, then doesn't.
+    private final class FlakyFetcher: @unchecked Sendable {
+        struct Failure: Error {}
+        private let lock = NSLock()
+        private let inputs: DashboardInputs
+        private var failing = false
+        init(inputs: DashboardInputs) { self.inputs = inputs }
+        func failFromNowOn() { lock.lock(); failing = true; lock.unlock() }
+        func next() throws -> DashboardInputs {
+            lock.lock(); let f = failing; lock.unlock()
+            if f { throw Failure() }
+            return inputs
+        }
+    }
 
     /// Monotonic page index for the stub (no `Date`/random in selftests).
     private final class Counter: @unchecked Sendable {
@@ -760,8 +898,28 @@ enum SelfTest {
         // …but the user's REQUESTED filter is preserved: the bar edits `filter`, so a
         // suppressed dimension is restored when the read recovers instead of being
         // silently written away on the next menu pick.
-        if degraded.filter.lane != .deep {
+        // The user's selection survives suppression — the view model still holds it,
+        // so the dimension comes back when the read recovers rather than being
+        // written away on the next menu pick. (The DATA object no longer carries the
+        // requested filter at all: that is what makes the caption unable to read it.)
+        let degradedVM = DashboardViewModel(fetcher: { degradedInputs })
+        degradedVM.apply(LeadFilter(lane: .deep))
+        _ = runMain { await degradedVM.load() }
+        if degradedVM.filter.lane != .deep {
             problems.append("filter: suppressing a dimension must not discard the user's selection")
+        }
+        if degradedVM.state.value?.effectiveFilter.lane != nil {
+            problems.append("filter: the APPLIED filter must have the uncomputable dimension dropped")
+        }
+        // The list caption is what ASSERTS a lens over the rows. It must describe the
+        // applied filter, never the requested one — naming a suppressed dimension
+        // over the whole unfiltered book is the defect three review rounds found.
+        if degradedVM.state.value?.listCaption?.contains(LeadFilter.Lane.deep.label) == true {
+            problems.append("filter: the list caption must not name a dimension that was not applied "
+                + "(got \(degradedVM.state.value?.listCaption ?? "nil"))")
+        }
+        if ABLeadsData.abFiltered.listCaption != ABLeadsData.abFiltered.effectiveFilter.summary {
+            problems.append("filter: the list caption must be the APPLIED filter's summary")
         }
         // A degraded load names what is understated rather than showing a confident
         // zero — the flag alone rendered nowhere.
