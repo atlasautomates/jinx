@@ -144,6 +144,12 @@ struct ABSearchOnlyHeader: View {
 struct ABSearchResultsPanel: View {
     let state: LeadSearchModel.SearchState
     var staticRender: Bool = false
+    /// The lens the hits are narrowed by — nil when nothing is filtered.
+    var scopeSummary: String? = nil
+    /// True while the user has asked to see hits from outside the filter.
+    var ignoringFilters: Bool = false
+    /// Toggle the filter on the results. nil = no control (harness/fixture path).
+    var onToggleFilters: ((Bool) -> Void)? = nil
     var onSelect: ((ABLeadsData.Lead) -> Void)? = nil
     let onClear: () -> Void
 
@@ -164,7 +170,7 @@ struct ABSearchResultsPanel: View {
     private var header: some View {
         HStack(spacing: DesignTokens.space2) {
             ABSectionLabel("Search results")
-            if case .results(_, let hits) = state {
+            if case .results(_, let hits, _) = state {
                 Text("(\(hits.count)\(hits.count >= LeadsRepository.searchResultLimit ? "+" : ""))")
                     .font(.abMono(DesignTokens.textXs))
                     .foregroundStyle(DesignTokens.textGhost)
@@ -175,13 +181,41 @@ struct ABSearchResultsPanel: View {
                     .foregroundStyle(DesignTokens.textSecondary)
                     .lineLimit(1)
             }
+            // The lens the hits obey, stated where the hits are. The query itself
+            // always covers the whole book — only the RESULTS are narrowed — so
+            // anything the filter removed is counted and offered below rather than
+            // silently dropped.
+            if let scopeSummary, !ignoringFilters {
+                Text("within \(scopeSummary)")
+                    .font(.adventor(DesignTokens.textXs, bold: true))
+                    .foregroundStyle(DesignTokens.accent)
+                    .lineLimit(1)
+            } else if scopeSummary != nil {
+                Text("whole lead book · filter ignored")
+                    .font(.adventor(DesignTokens.textXs))
+                    .foregroundStyle(DesignTokens.textMuted)
+            }
             Spacer()
-            Text("whole lead book · filters not applied")
-                .font(.adventor(DesignTokens.textXs))
-                .foregroundStyle(DesignTokens.textGhost)
+            hiddenNotice
             ABBackToLeadsButton(action: onClear)
         }
         .padding(.horizontal, DesignTokens.space3)
+    }
+
+    /// "+N outside this filter" — the counted, clickable escape hatch. A hit the
+    /// lens removes must never be indistinguishable from a lead that isn't there.
+    @ViewBuilder
+    private var hiddenNotice: some View {
+        if case .results(_, _, let hidden) = state, let onToggleFilters {
+            if hidden > 0 && !ignoringFilters {
+                ABInlineLink(text: "+\(hidden) outside this filter",
+                             icon: "plus.magnifyingglass") { onToggleFilters(true) }
+            } else if ignoringFilters {
+                ABInlineLink(text: "apply filter", icon: "line.3.horizontal.decrease") {
+                    onToggleFilters(false)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -196,15 +230,49 @@ struct ABSearchResultsPanel: View {
             // A failed search must never look like "no such lead".
             ABMessageRow(icon: "exclamationmark.triangle", text: message,
                          tone: .warn, centered: true)
-        case .results(let term, let hits):
+        case .results(let term, let hits, let hidden):
             if hits.isEmpty {
+                // An empty result under an active filter is NOT "no such lead" —
+                // say which it is, and offer the wider search.
                 ABMessageRow(icon: "questionmark.circle",
-                             text: "No lead matches “\(term)”.", tone: .muted, centered: true)
+                             text: hidden > 0
+                                 ? "No lead matches “\(term)” within this filter — \(hidden) match outside it."
+                                 : "No lead matches “\(term)”.",
+                             tone: .muted, centered: true)
             } else {
                 ABLeadRowsTable(leads: hits, staticRender: staticRender, onSelect: onSelect)
                     .frame(maxHeight: .infinity, alignment: .top)
             }
         }
+    }
+}
+
+/// Small inline action inside a panel header (teal, hover-lit, real hit area).
+private struct ABInlineLink: View {
+    let text: String
+    let icon: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: DesignTokens.space1) {
+                Image(systemName: icon).font(.system(size: 8, weight: .bold))
+                Text(text).font(.adventor(DesignTokens.textXs, bold: true))
+            }
+            .foregroundStyle(hovering ? DesignTokens.accentStrong : DesignTokens.accent)
+            // Padding inside the label so the padded area is clickable, not merely
+            // painted (the filter-pill lesson).
+            .padding(.horizontal, DesignTokens.space2)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(hovering ? DesignTokens.accentBg : Color.clear))
+            .overlay(Capsule().strokeBorder(
+                hovering ? DesignTokens.accentBorder : DesignTokens.borderSubtle, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .animation(ABMotion.fast, value: hovering)
+        .onHover { hovering = $0 }
     }
 }
 

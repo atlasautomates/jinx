@@ -117,11 +117,23 @@ struct LeadSnapshot: Sendable {
 
     init(_ inputs: DashboardInputs) {
         self.inputs = inputs
-        self.facets = inputs.leads.map {
-            LeadFacets(lead: $0,
-                       deepLane: inputs.deepLaneLeadIDs.contains($0.id),
-                       personalized: inputs.personalizedLeadIDs.contains($0.id))
+        // Built through the same per-row derivation the search path uses, so a hit
+        // and a list row can never be classified differently.
+        self.facets = inputs.leads.map { row in
+            LeadFacets(lead: row,
+                       deepLane: inputs.deepLaneLeadIDs.contains(row.id),
+                       personalized: inputs.personalizedLeadIDs.contains(row.id))
         }
+    }
+
+    /// Facets for ANY row, including one the snapshot doesn't contain (a search hit
+    /// from beyond the fetched book). The id sets are the whole classification, so
+    /// this is exact for rows in the book and correctly reports "no opener" only
+    /// when the enrichment reads genuinely say so.
+    func facets(for row: LeadRow) -> LeadFacets {
+        LeadFacets(lead: row,
+                   deepLane: inputs.deepLaneLeadIDs.contains(row.id),
+                   personalized: inputs.personalizedLeadIDs.contains(row.id))
     }
 }
 

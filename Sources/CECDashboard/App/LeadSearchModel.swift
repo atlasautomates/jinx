@@ -4,12 +4,13 @@ import Observation
 /// Owns the Leads tab's search box: the typed query, the in-flight request, and
 /// the hit list.
 ///
-/// Search is a SERVER query against the whole `leads` table, deliberately not a
-/// local filter over the loaded snapshot — the snapshot is capped, and "I can't
-/// find the lead I know exists" is the one failure this feature cannot have. It is
-/// also independent of the filter bar: filters are the analytic lens over the book,
-/// search is a lookup, and silently returning nothing because a filter was left set
-/// would be indistinguishable from the lead not existing.
+/// The QUERY is always against the whole `leads` table, never the loaded snapshot —
+/// the snapshot is capped, and "I can't find the lead I know exists" is the one
+/// failure this feature cannot have. The RESULTS are then narrowed by whatever
+/// filter the tab has applied, so the search box answers the same question as the
+/// rest of the screen. The two are deliberately separated: anything the filter hides
+/// is COUNTED and offered ("+3 outside this filter"), so a hidden lead never reads
+/// as a missing one.
 @MainActor
 @Observable
 final class LeadSearchModel {
@@ -17,11 +18,19 @@ final class LeadSearchModel {
     /// results stay on screen while the box is edited, until Enter is pressed again.
     var query: String = ""
     private(set) var state: SearchState = .idle
+    /// The lens results are narrowed by — the tab's APPLIED filter, pushed in by
+    /// `RootView` whenever it changes or a load lands.
+    private(set) var scope: LeadFilter = .all
+    /// Set by the user to see every hit regardless of the filter. Resets whenever a
+    /// new search is submitted, so it is a per-look-up escape hatch and not a mode
+    /// someone can leave on and forget.
+    private(set) var ignoringFilters = false
 
     enum SearchState {
         case idle
         case searching(term: String)
-        case results(term: String, hits: [ABLeadsData.Lead])
+        /// `hiddenByFilter` = hits the query found that the current lens excludes.
+        case results(term: String, hits: [ABLeadsData.Lead], hiddenByFilter: Int)
         case failed(term: String, message: String)
 
         var isSearching: Bool { if case .searching = self { return true }; return false }
@@ -29,7 +38,7 @@ final class LeadSearchModel {
         var term: String? {
             switch self {
             case .idle: return nil
-            case .searching(let t), .results(let t, _), .failed(let t, _): return t
+            case .searching(let t), .results(let t, _, _), .failed(let t, _): return t
             }
         }
     }
@@ -40,9 +49,31 @@ final class LeadSearchModel {
         didSet { live.set(inFlight) }
     }
 
+    /// Raw hits, kept so a filter change re-narrows them without re-querying.
+    private var rawHits: [LeadRow] = []
+    /// Classifies a row into filter dimensions. nil when there is no snapshot (the
+    /// load failed) — the filter then cannot be applied and the panel says so rather
+    /// than silently showing everything as if it had been.
+    private var facetsFor: ((LeadRow) -> LeadFacets)? = nil
+
     /// Dev-only offline search (`--fixture`): same sanitizer, same result shape,
     /// no network. Set by `RootView` only when the flag is present.
     var fixtureRows: [LeadRow]? = nil
+
+    /// Push the tab's applied lens in. Re-narrows anything already on screen, so
+    /// changing a filter with results up updates them in place.
+    func updateScope(filter: LeadFilter, facets: ((LeadRow) -> LeadFacets)?) {
+        scope = filter
+        facetsFor = facets
+        refilter()
+    }
+
+    /// Show every hit for the CURRENT term, filter or not.
+    func setIgnoringFilters(_ ignoring: Bool) {
+        guard ignoring != ignoringFilters else { return }
+        ignoringFilters = ignoring
+        refilter()
+    }
 
     /// Run the query currently in the box (Enter). A blank/too-short term clears
     /// rather than searching, so ⌫⌫⏎ puts the tab back the way it was.
@@ -56,10 +87,9 @@ final class LeadSearchModel {
         }
         inFlight?.cancel()
         inFlight = nil
+        ignoringFilters = false   // a new look-up starts inside the current lens
         if let fixtureRows {
-            state = .results(term: term,
-                             hits: LeadsFixtureSource.search(term, in: fixtureRows)
-                                 .map { ABLeadsData.lead($0) })
+            publish(term: term, rows: LeadsFixtureSource.search(term, in: fixtureRows))
             return
         }
         state = .searching(term: term)
@@ -70,7 +100,7 @@ final class LeadSearchModel {
                 // ran the Keychain read on the main thread.
                 let rows = try await Self.runSearch(term, client: client)
                 if Task.isCancelled { return }
-                self?.state = .results(term: term, hits: rows.map { ABLeadsData.lead($0) })
+                self?.publish(term: term, rows: rows)
                 self?.inFlight = nil
             } catch is CancellationError {
                 return
@@ -89,6 +119,40 @@ final class LeadSearchModel {
         try await LeadsRepository(client: try client()).search(term)
     }
 
+    /// Store the raw hits and render them through the current lens.
+    private func publish(term: String, rows: [LeadRow]) {
+        rawHits = rows
+        state = Self.narrow(term: term, rows: rows, scope: scope,
+                            facets: facetsFor, ignoring: ignoringFilters)
+    }
+
+    /// Re-narrow what is already on screen (filter changed, or the escape hatch
+    /// toggled). No-op unless results are showing.
+    private func refilter() {
+        guard case .results(let term, _, _) = state else { return }
+        state = Self.narrow(term: term, rows: rawHits, scope: scope,
+                            facets: facetsFor, ignoring: ignoringFilters)
+    }
+
+    /// PURE (selftest target): split hits into shown and hidden-by-filter.
+    ///
+    /// With no facet resolver the filter cannot be evaluated, so nothing is hidden —
+    /// showing fewer leads than exist because we couldn't classify them would be the
+    /// silent-omission failure this whole feature is built to avoid.
+    static func narrow(term: String, rows: [LeadRow], scope: LeadFilter,
+                       facets: ((LeadRow) -> LeadFacets)?, ignoring: Bool) -> SearchState {
+        guard scope.isActive, !ignoring, let facets else {
+            return .results(term: term, hits: rows.map { ABLeadsData.lead($0) }, hiddenByFilter: 0)
+        }
+        var shown: [ABLeadsData.Lead] = []
+        var hidden = 0
+        for row in rows {
+            let f = facets(row)
+            if scope.matches(f) { shown.append(ABLeadsData.lead(row, facets: f)) } else { hidden += 1 }
+        }
+        return .results(term: term, hits: shown, hiddenByFilter: hidden)
+    }
+
     /// Drop the results and the query — the tab returns to its filtered view.
     func clear() {
         dismissResults()
@@ -99,6 +163,8 @@ final class LeadSearchModel {
     func dismissResults() {
         inFlight?.cancel()
         inFlight = nil
+        rawHits = []
+        ignoringFilters = false
         state = .idle
     }
 

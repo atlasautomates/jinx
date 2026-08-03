@@ -23,25 +23,40 @@ enum PreviewRegistry {
         "leads-detail": { AnyView(ABLeadsView(data: .ab, interactionDemo: true, staticRender: true)) },
         // Filter bar in its ACTIVE state: two dimensions set, and every figure on
         // the tab computed from that narrowed set (the feature's whole claim).
-        "leads-filtered": { AnyView(ABLeadsView(data: .abFiltered, staticRender: true)) },
+        // The bar's pills read the REQUESTED filter (a separate input from the data,
+        // so a view can't mistake it for what was applied) — a still must pass it or
+        // it shows unlit pills above a caption saying the view is filtered.
+        "leads-filtered": { AnyView(ABLeadsView(data: .abFiltered, staticRender: true,
+                                                requestedFilter: ABLeadsData.abFiltered.effectiveFilter)) },
         // Search results owning the list column, with the box carrying its term.
         "leads-search":   { AnyView(ABLeadsView(
             data: .ab, staticRender: true,
             searchQuery: .constant("harbor"),
-            searchState: .results(term: "harbor", hits: Array(ABLeadsData.ab.recentLeads.prefix(3))))) },
+            searchState: .results(term: "harbor", hits: Array(ABLeadsData.ab.recentLeads.prefix(3)),
+                                  hiddenByFilter: 0))) },
         // The three states nobody looks at unless they are registered: a search that
         // found nothing, one that FAILED (must not read as "no such lead"), and a
         // degraded load naming which figures are understated.
         "leads-search-empty": { AnyView(ABLeadsView(
             data: .ab, staticRender: true,
             searchQuery: .constant("zzzz"),
-            searchState: .results(term: "zzzz", hits: []))) },
+            searchState: .results(term: "zzzz", hits: [], hiddenByFilter: 0))) },
         "leads-search-failed": { AnyView(ABLeadsView(
             data: .ab, staticRender: true,
             searchQuery: .constant("harbor"),
             searchState: .failed(term: "harbor",
                                  message: "Network error: The request timed out."))) },
         "leads-degraded": { AnyView(ABLeadsView(data: .abDegraded, staticRender: true)) },
+        // Search results NARROWED by the active filter, with the hits it removed
+        // counted and offered — a hidden lead must never read as a missing one.
+        "leads-search-scoped": { AnyView(ABLeadsView(
+            data: .abFiltered, staticRender: true,
+            requestedFilter: ABLeadsData.abFiltered.effectiveFilter,
+            searchQuery: .constant("solar"),
+            searchState: .results(term: "solar",
+                                  hits: Array(ABLeadsData.ab.recentLeads.prefix(2)),
+                                  hiddenByFilter: 7),
+            onToggleSearchFilters: { _ in })) },
         // Lead dossier at rest, then with the click-to-copy affordance forced:
         // Industry hovered (glyph + lifted surface), Email just copied.
         "profile":      { AnyView(LeadProfileFixture.view()) },

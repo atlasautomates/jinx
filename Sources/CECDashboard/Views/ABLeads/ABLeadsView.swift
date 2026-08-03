@@ -41,6 +41,10 @@ struct ABLeadsView: View {
     var searchState: LeadSearchModel.SearchState = .idle
     var onSearchSubmit: (() -> Void)? = nil
     var onSearchClear: (() -> Void)? = nil
+    /// True while the user asked to see hits from outside the active filter.
+    var searchIgnoringFilters: Bool = false
+    /// Toggle the filter on the search results. nil = no control (harness path).
+    var onToggleSearchFilters: ((Bool) -> Void)? = nil
 
     /// True while search results own the list column.
     private var searching: Bool {
@@ -109,6 +113,11 @@ struct ABLeadsView: View {
     private var listColumn: some View {
         if searching {
             ABSearchResultsPanel(state: searchState, staticRender: staticRender,
+                                 // The hits obey the APPLIED lens, like every other
+                                 // number on the tab.
+                                 scopeSummary: data.effectiveFilter.summary,
+                                 ignoringFilters: searchIgnoringFilters,
+                                 onToggleFilters: onToggleSearchFilters,
                                  onSelect: onSelectLead,
                                  onClear: onSearchClear ?? {})
         } else {

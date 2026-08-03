@@ -57,11 +57,13 @@ struct RootView: View {
         if LeadsFixtureSource.isRequested {
             model.loadFixture()
             searchModel.fixtureRows = model.snapshotLeads
+            syncSearchScope()
         } else {
             // Never leave a fixture book behind a live snapshot: search would keep
             // answering from synthetic rows while the tab showed real ones.
             searchModel.fixtureRows = nil
             await model.load()
+            syncSearchScope()
         }
     }
 
@@ -212,12 +214,30 @@ struct RootView: View {
             fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
             loadedAt: fixture ? nil : model.loadedAt,
             requestedFilter: model.filter,
-            onFilterChange: { model.apply($0) },
+            onFilterChange: { newFilter in
+                model.apply(newFilter)
+                syncSearchScope()
+            },
             searchQuery: Bindable(searchModel).query,
             searchState: searchModel.state,
-            onSearchSubmit: { searchModel.submit() },
-            onSearchClear: { searchModel.clear() }
+            onSearchSubmit: {
+                // Scope first: a search submitted before the scope is pushed would
+                // render its hits unfiltered for one pass.
+                syncSearchScope()
+                searchModel.submit()
+            },
+            onSearchClear: { searchModel.clear() },
+            searchIgnoringFilters: searchModel.ignoringFilters,
+            onToggleSearchFilters: { searchModel.setIgnoringFilters($0) }
         )
+    }
+
+    /// Push the tab's APPLIED filter into the search model, so hits are narrowed by
+    /// the same lens as everything else on screen (and anything it removes is counted
+    /// and offered rather than silently dropped).
+    private func syncSearchScope() {
+        searchModel.updateScope(filter: model.state.value?.effectiveFilter ?? .all,
+                                facets: model.facetResolver)
     }
 
     /// Retry from the error state — offline mode retries the fixture, not the network.
@@ -225,6 +245,7 @@ struct RootView: View {
         if LeadsFixtureSource.isRequested {
             model.loadFixture()
             searchModel.fixtureRows = model.snapshotLeads
+            syncSearchScope()
         } else {
             Task { await model.load() }
         }

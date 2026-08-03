@@ -61,6 +61,15 @@ final class DashboardViewModel {
     /// The loaded lead rows (fixture search runs against these).
     var snapshotLeads: [LeadRow] { snapshot?.inputs.leads ?? [] }
 
+    /// Classifies any row into filter dimensions using this load's enrichment id
+    /// sets — so a search hit is filtered by exactly the derivation the list uses.
+    /// nil with no snapshot: the filter then cannot be evaluated, and the search
+    /// panel says so instead of quietly showing everything.
+    var facetResolver: ((LeadRow) -> LeadFacets)? {
+        guard let snapshot else { return nil }
+        return { snapshot.facets(for: $0) }
+    }
+
     /// Fetch + map. Keeps the last good value on screen during a refresh, and
     /// degrades to `.stale` (data + reason) rather than `.failed` if one was present.
     /// The layout is fully deterministic (same shape as the Campaigns/Pipeline tabs);

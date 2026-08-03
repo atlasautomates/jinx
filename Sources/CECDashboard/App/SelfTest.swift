@@ -449,7 +449,7 @@ enum SelfTest {
         search.fixtureRows = vm.snapshotLeads
         search.query = "Harborline"
         search.submit()
-        guard case .results(_, let hits) = search.state, !hits.isEmpty else {
+        guard case .results(_, let hits, _) = search.state, !hits.isEmpty else {
             problems.append("search-vm: an offline search over the fixture book must return hits")
             return problems
         }
@@ -471,6 +471,45 @@ enum SelfTest {
         if capped.first?.createdAt ?? "" < capped.last?.createdAt ?? "" {
             problems.append("search-vm: offline hits must be newest-first like the live query")
         }
+        // Results obey the tab's APPLIED lens — and everything the lens removes is
+        // COUNTED, never silently dropped: a hidden lead must stay distinguishable
+        // from a lead that isn't there, or the feature reintroduces the exact failure
+        // it exists to prevent.
+        let bookRows = [
+            LeadRow(id: "tx", companyName: "Acme Texas", firstName: nil, industry: nil,
+                    leadSource: "sales-nav", city: nil, state: "TX",
+                    createdAt: "2026-07-20T00:00:00+00:00"),
+            LeadRow(id: "fl", companyName: "Acme Florida", firstName: nil, industry: nil,
+                    leadSource: "sales-nav", city: nil, state: "FL",
+                    createdAt: "2026-07-19T00:00:00+00:00"),
+        ]
+        let resolve: (LeadRow) -> LeadFacets = { LeadFacets(lead: $0, deepLane: false, personalized: false) }
+        let scoped = LeadSearchModel.narrow(term: "acme", rows: bookRows,
+                                            scope: LeadFilter(region: "Texas"),
+                                            facets: resolve, ignoring: false)
+        guard case .results(_, let scopedHits, let hidden) = scoped else {
+            problems.append("search-scope: expected results")
+            return problems
+        }
+        if scopedHits.map(\.leadID) != ["tx"] || hidden != 1 {
+            problems.append("search-scope: hits must be narrowed by the applied filter, with the "
+                + "rest COUNTED (got \(scopedHits.map { $0.leadID ?? "?" }), hidden \(hidden))")
+        }
+        // The escape hatch really does widen it.
+        if case .results(_, let allHits, let none) = LeadSearchModel.narrow(
+            term: "acme", rows: bookRows, scope: LeadFilter(region: "Texas"),
+            facets: resolve, ignoring: true), allHits.count != 2 || none != 0 {
+            problems.append("search-scope: ignoring the filter must show every hit")
+        }
+        // No resolver (the snapshot read failed) → the filter CANNOT be evaluated, so
+        // nothing may be hidden. Showing fewer leads than exist because we couldn't
+        // classify them is the silent omission this must never make.
+        if case .results(_, let unclassified, let hiddenBlind) = LeadSearchModel.narrow(
+            term: "acme", rows: bookRows, scope: LeadFilter(region: "Texas"),
+            facets: nil, ignoring: false), unclassified.count != 2 || hiddenBlind != 0 {
+            problems.append("search-scope: with no facet resolver nothing may be hidden")
+        }
+
         search.query = "H"
         search.submit()
         if search.query != "H" {

@@ -110,13 +110,22 @@ private struct ABFilterMenu: View {
         // pill alone (identical chrome, no menu) — the harness only ever needs to
         // show the bar's STATE.
         if isStaticRender {
-            label.pillChrome(active: active, hovering: hovering)
+            label.pillPadding().pillChrome(active: active, hovering: hovering)
         } else {
-            // The chrome goes on the MENU, not on its label: a `Menu` composes its
-            // label with the system's own indicator and lays the result out itself,
-            // so a background/border applied inside the label is dropped — live, the
-            // bar rendered as bare text with a leading chevron while the still showed
-            // proper pills.
+            // PADDING INSIDE the label, CHROME outside. Both halves are load-bearing
+            // and they pull in opposite directions:
+            //
+            // - A background/border applied inside a `Menu`'s label is dropped (the
+            //   menu composes the label with its own indicator and lays the result
+            //   out itself), so the fill and the border must go on the outside.
+            // - But the menu's CLICK TARGET is its label. Padding applied outside
+            //   enlarges the drawn capsule without enlarging the hit region, so the
+            //   pill lit up on hover across its whole area (the hover modifier is on
+            //   the outer view) while only the text was actually clickable. Reported
+            //   as "takes a couple of tries depending on where I click".
+            //
+            // Padding the label makes the label the size of the capsule, so the two
+            // finally agree.
             Menu {
                 Button("All \(title.lowercased())s") { onPick(nil) }
                 if !options.isEmpty { Divider() }
@@ -130,7 +139,7 @@ private struct ABFilterMenu: View {
                     }
                 }
             } label: {
-                label
+                label.pillPadding()
             }
             .menuStyle(.button)
             .buttonStyle(.plain)
@@ -181,10 +190,18 @@ extension View {
     /// answered a pointer with nothing. Same failure class as the copy-target
     /// finding in learnings.md: an emphasis state eating the channel feedback
     /// needed.
+    /// The pill's interior. Applied to a control's LABEL (inside a `Menu`, inside a
+    /// `Button`) so the padded area is part of the hit region, not just of the
+    /// drawing. Generous on purpose: these are small targets in a dense bar.
+    func pillPadding() -> some View {
+        self
+            .padding(.horizontal, DesignTokens.space3)
+            .padding(.vertical, DesignTokens.controlPaddingY)
+            .contentShape(Capsule())
+    }
+
     func pillChrome(active: Bool, hovering: Bool) -> some View {
         self
-            .padding(.horizontal, DesignTokens.space2)
-            .padding(.vertical, DesignTokens.controlPaddingY)
             .background(Capsule().fill(
                 active ? (hovering ? DesignTokens.accentBgHover : DesignTokens.accentBg)
                        : (hovering ? DesignTokens.bgHighlight : Color.clear)))
