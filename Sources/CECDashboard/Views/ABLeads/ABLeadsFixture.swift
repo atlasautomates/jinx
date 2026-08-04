@@ -125,7 +125,7 @@ extension ABLeadsData {
     /// force-unwraps; every divisor is guarded and empty/degraded inputs are
     /// tolerated (all-zero series, nil fields, failed supplementary reads).
     ///
-    /// Mapping decisions (documented in SHIP-NOTES.md):
+    /// Mapping decisions (documented in builds/lead-dashboard/SHIP-NOTES.md):
     /// - `scraped`  = exact full-table lead count (`totalCount`).
     /// - `emailed`  = distinct leads that reached the `campaigned` enrichment stage
     ///   (added to an outbound campaign). Exact when the full-table stage counts are
