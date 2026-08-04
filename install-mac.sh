@@ -35,7 +35,22 @@ ditto "$APP" "$STAGED"
 # Verify the SIGNATURE before anything is swapped — a bad signature must cost
 # nothing. (The Keychain acceptance can only run after the swap: the grant is
 # path-independent in principle, but this script is not the place to bet on it.)
-codesign -dvv "$STAGED" 2>&1 | grep -q "Authority=Developer ID Application" \
+#
+# CAPTURE THEN MATCH — never `codesign … | grep -q` under `set -o pipefail`.
+#
+# `grep -q` exits the moment it matches, `codesign` gets SIGPIPE and returns 141,
+# and pipefail then reports the PIPELINE as failed — precisely BECAUSE the pattern
+# was found. Whether it bites depends on which process wins the race, which is why
+# this looked like a flaky "trustd lag" when it was first seen (2026-07-24) and was
+# recorded as a known nit rather than a bug. On 2026-08-03 it lost the race five
+# times in a row and aborted a perfectly good install. A here-string has no pipe and
+# no race.
+signed_ok() {
+  local out
+  out="$(codesign -dvv "$1" 2>&1)" || return 1
+  grep -q "Authority=Developer ID Application" <<<"$out"
+}
+signed_ok "$STAGED" \
   || { echo "FAIL: staged app is not Developer-ID signed — live app untouched"; exit 1; }
 
 if [[ -d "$LIVE" ]]; then mv "$LIVE" "$PREVIOUS"; fi
