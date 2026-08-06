@@ -1,18 +1,18 @@
 import Foundation
 import Observation
 
-/// Owns the Campaigns tab's async state. Mirrors `DashboardViewModel` but simpler:
-/// the layout is deterministic (built in `CampaignBuilder`), so there's no if-changed
-/// layout gate — just fetch → compose → render, with the same
-/// loading / loaded / stale / failed semantics (never a silent blank).
+/// Owns the Campaigns tab's top-level async state: the composed campaign list
+/// (`CampaignInputs`) behind the drill-down's level 1. Mirrors
+/// `DashboardViewModel`'s loading / loaded / stale / failed semantics (never a
+/// silent blank); drill levels 2–3 live in `CampaignDrillModel`.
 @MainActor
 @Observable
 final class CampaignDashboardViewModel {
-    private(set) var state: Loadable<Dashboard> = .idle
-    /// The composed summaries behind the dashboard — feeds the campaign
-    /// inspector's clickable list (P4).
-    private(set) var summaries: [CampaignSummary] = []
+    private(set) var state: Loadable<CampaignInputs> = .idle
     private(set) var isRefreshing = false
+
+    /// The composed summaries behind the campaign list (level 1 rows).
+    var summaries: [CampaignSummary] { state.value?.summaries ?? [] }
 
     func load() async {
         guard !isRefreshing else { return }
@@ -25,9 +25,7 @@ final class CampaignDashboardViewModel {
         do {
             let client = try SupabaseClient.make()
             let repo = CampaignsRepository(client: client)
-            let inputs = try await repo.fetch()
-            summaries = inputs.summaries
-            state = .loaded(CampaignBuilder.build(inputs))
+            state = .loaded(try await repo.fetch())
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if let previous {

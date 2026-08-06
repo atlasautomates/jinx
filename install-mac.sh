@@ -27,4 +27,9 @@ codesign -dvv /Applications/CECDashboard.app 2>&1 | grep -q "Authority=Developer
 # Acceptance: headless query must answer WITHOUT a Keychain prompt (grant survived).
 OUT="$(/Applications/CECDashboard.app/Contents/MacOS/CECDashboard --query count 2>&1 || true)"
 grep -q "leads" <<<"$OUT" || { echo "FAIL: headless --query broke (Keychain grant?): $OUT"; exit 1; }
-echo "Installed + verified: $OUT"
+# Acceptance: the WRITE key (staged-copy revisions) — absent is a designed
+# state (read-only editor), but present-yet-unreadable means a stale ACL that
+# will prompt or silently downgrade at first use. Fail loudly instead.
+WOUT="$(/Applications/CECDashboard.app/Contents/MacOS/CECDashboard --check-write-key 2>&1)" \
+  || { echo "FAIL: write key present but unreadable (re-grant: delete then add with -T): $WOUT"; exit 1; }
+echo "Installed + verified: $OUT | $WOUT"

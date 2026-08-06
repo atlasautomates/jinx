@@ -8,6 +8,9 @@ import SwiftUI
 
 /// Full-tab loading placeholder — teal spinner on the near-black world.
 struct ABLoadingView: View {
+    /// What's loading ("leads", "campaigns", …) — defaults keep existing call sites.
+    var noun: String = "leads"
+
     var body: some View {
         ZStack {
             DesignTokens.bgRoot.ignoresSafeArea()
@@ -15,7 +18,7 @@ struct ABLoadingView: View {
                 ProgressView()
                     .controlSize(.large)
                     .tint(DesignTokens.accent)
-                Text("Loading leads…")
+                Text("Loading \(noun)…")
                     .font(.adventor(DesignTokens.textBase))
                     .foregroundStyle(DesignTokens.textMuted)
             }
@@ -31,6 +34,8 @@ struct ABLoadingView: View {
 struct ABErrorView: View {
     let message: String
     var onRetry: (() -> Void)? = nil
+    /// What failed to load ("leads", "campaigns", …) — defaults keep existing call sites.
+    var noun: String = "leads"
     @State private var hovering = false
 
     var body: some View {
@@ -41,7 +46,7 @@ struct ABErrorView: View {
                     .font(.system(size: 32))
                     .foregroundStyle(DesignTokens.statusRedText)
 
-                Text("Couldn't load leads")
+                Text("Couldn't load \(noun)")
                     .font(.adventor(DesignTokens.textXl, bold: true))
                     .foregroundStyle(DesignTokens.textPrimary)
 

@@ -166,3 +166,133 @@ tolerance, and the empty-statusCounts fallback.
   to committed `AB-ARM/previews/*` (design provably unchanged).
 - `--check-supabase` — OK; new reply/send_queue probes succeed live.
 - GUI not launched.
+
+---
+
+# Campaigns drill-down revamp — SHIP notes (2026-08-05)
+
+Replaces the Campaigns tab's widget dashboard + Palette-styled inspector with a
+three-level drill-down on the AB design system (design brief:
+`.claude/design/briefs/campaigns-drilldown.md`): campaign list (status on row) →
+campaign's leads → per-lead correspondence, including STAGED sends. Adds the
+app's first and only write path: posting copy revisions to staged sends.
+
+## Data model (all reads anon/GET-only)
+
+- **Level 1** — existing `CampaignsRepository.fetch()` compose (campaigns +
+  campaigns_tracking + campaign_leads + send_queue), unchanged semantics.
+  `CampaignDashboardViewModel.state` is now `Loadable<CampaignInputs>` (the
+  `Dashboard` widget build + `CampaignBuilder` are deleted).
+- **Level 2** — existing `roster(campaignId:)` (campaign_leads ⟕ leads).
+- **Level 3** — new `correspondence(campaignId:leadId:)`:
+  `lead_interactions` (lead-scoped, newest-first cap+1 at 500) merged with
+  `send_queue` scoped to (campaign, lead). Pure seam `composeCorrespondence`
+  (SelfTest-pinned): sent queue rows whose `queue_id` appears in an archived
+  interaction's metadata dedupe out (the archive is richer); pending rows render
+  as STAGED (dashed); failed/skipped labeled; unarchived sent rows render
+  compactly. Ascending by parsed date, id tiebreak. Metadata reads go through
+  `LeadInteractionRow.meta` (handles the double-encoded jsonb shape).
+
+## Data honesty
+
+- Interaction archive for outbound sends is subject-only (ce-outbound writes no
+  transcript): cards say the copy is the pool template rather than faking a body.
+- `campaign_sequences` has NO anon SELECT — staged copy from the pool template is
+  labeled "not readable with the dashboard key", never fabricated.
+  `subject_override`/`body_override` render when present ("revised" pill).
+- Failed queue rows say "copy is the step's pool template", never "sent".
+- Degraded reads caption themselves: partial level-1 compose, truncated roster,
+  failed name join, one-sided correspondence reads, truncated history,
+  missing write key (read-only hint).
+- `lead_interactions` has no campaign column: the timeline deliberately shows
+  the lead's WHOLE history; rows whose metadata names a different campaign are
+  tagged "other campaign".
+
+## The write path (scope revision, user-directed 2026-08-05)
+
+- `SupabaseWriteClient` — the ONE write seam. Separate Keychain item
+  (`supabase_write_key`, same service); absent → editor degrades to read-only
+  with the grant command. Read client stays GET-only (comment updated to point
+  here; never add writes there).
+- Exactly one operation: PATCH `send_queue` `subject_override`/`body_override`
+  by PRIMARY KEY + `status=eq.pending` + `claimed_at=is.null`. A row the sender
+  claimed (`status='sending'`) or finished can never be rewritten; 0 matched
+  rows surfaces as "no longer editable". PostgREST ignores `limit` on PATCH
+  (pinned in ce-outbound), so the id filter is the guard, not a nicety.
+- Overrides are ce-outbound's existing VIP mechanism: the sender prefers them
+  over the pool template and still substitutes `{{merge}}` slots; the editor
+  says so. Emptying both fields writes NULLs = back to the pool template.
+- No RLS/policy changes: anon stays read-only server-side. The write key is
+  device-only in the Keychain, ACL-bound to the signed app.
+
+## UI
+
+- `Views/ABCampaigns/`: `ABCampaignsView` (root, breadcrumb, level transitions,
+  L1 table), `ABCampaignLeads` (L2), `ABCorrespondence` (L3 + editor),
+  `ABCampaignsFixture` (frozen harness data). `CampaignDrillModel` carries the
+  drill state with the house newest-wins generation guard; `saveRevision`
+  re-checks the generation before its post-save reload.
+- `ABStatusPill` gained an `init(text:role:)`; `ABLoadingView`/`ABErrorView`
+  gained a `noun` (defaults keep Leads call sites).
+- Harness: `campaigns` / `campaign-leads` / `campaign-thread` registered on the
+  fixture; `TextEditor` (NSTextView-backed) is gated off `isStaticRender` so
+  stills render the draft as text. Layout gotcha pinned in-code: a width-only
+  `Color.clear` in a header row is vertically greedy and spreads the table.
+- Deleted: `CampaignBuilder.swift`, `CampaignInspectorView.swift` (+ their
+  SelfTest widget checks, replaced by compose/funnel/cardLabel checks).
+
+## Known gaps (deliberate)
+
+- Staged pool-template copy can be OVERRIDDEN but not viewed (no anon read on
+  campaign_sequences); revising replaces the template blind. Honest label in UI.
+- Editing is conservative: a stale `claimed_at` from a crashed sender blocks the
+  edit until the watchdog clears it — fail-closed beats racing the sender.
+- No editor-open preview still (`editingId` is view-local @State); the editor is
+  exercised live, its closed-state affordance is in `campaign-thread`.
+
+## Review response (7 pinned lenses + 2 ad-hoc: sender-contract, drill-state-machine)
+
+Nine parallel reviewers; no CRITICALs. Every HIGH/MEDIUM fixed and pinned in
+`--selftest` where a pure seam exists:
+
+- **Sender-contract HIGHs**: `RevisionLint` refuses drafts the sender would
+  corrupt — unknown/malformed `{{slots}}` (would ship literal braces; the
+  sender's leftover-check regex misses spaced/digit variants) and
+  non-atlasautomates links (`_defang_links` strips them silently). Pinned.
+- **PostgREST 1000-row cap** (code+reliability HIGH, pre-existing):
+  `campaignLeads()` now pages with short-page termination like `roster()`; the
+  dead-probe windowed read and the consumerless `sendQueueRows`/`sendsByAccount`
+  fetch are gone.
+- **meta() numeric jsonb** (QA MEDIUM, failing driver): `.number` values now
+  surface; selftest fixture uses the producer's numeric shape.
+- **Timeline identity** (swift M1): interaction ids derive from the selected PK
+  (`order=interaction_at.desc,id.desc`); roster dedupes duplicate lead_ids.
+- **Write response three-way** (3×MEDIUM): parse-failure → `.unconfirmed`
+  ("may have landed — refresh"), never `.rowNotEditable`.
+- **Write hardening** (security): UUID allowlist on the id (sender parity),
+  subject control-char strip (bare-\n malformed-header class, verified against
+  smtp_send.py), guard-triple + sanitizer + lint pinned in selftest, os.Logger
+  audit trail (hashed queue id, lengths only), attributes-only Keychain probe.
+- **Drill state machine** (F1/F2/F5/F6): save-success closes only the saved
+  card's editor + revise buttons disabled while saving; `refreshLevel()` gives
+  levels 2/3 a real in-place refresh (header button + 10-min tick) and
+  re-resolves the lead pill; `revisionError` cleared on navigation/editor-open;
+  `.rowNotEditable` now reloads the thread so the stale Staged card snaps to
+  reality; breadcrumb + vanished-campaign caption route through the live list.
+- **Bounce/legacy contract** (sender F5/F6/F7): failed-with-archive renders
+  "Bounced" (never "never sent"); legacy sent rows fuzzy-dedupe (step + Δt<180s);
+  `sending` labeled in-flight; step-1 `variant_index` labeled as angle A/B/C,
+  later steps "attributed", never "variant".
+- **Platform**: stateful `pointingCursor` (onDisappear pop), rows are real
+  Buttons (keyboard/VoiceOver), POSIX date locales, CWE-134 NSLog "%@" fixes,
+  `--check-write-key` acceptance step in install-mac.sh, `campaign-thread-editing`
+  harness still (caught the ungated subject TextField at 19,808 yellow px).
+
+**Accepted (recorded, not fixed)**: superseded drill loads keep paging (bounded
+10×15s, generation guards correctness — no cancellation plumbing yet); the
+service-key-in-Keychain write credential stands per security review ("does not
+meaningfully widen" the existing `.env` exposure; anon-UPDATE correctly
+rejected) with a **follow-up**: move the write behind a Modal bearer-auth
+endpoint so the pending/claimed guards become server-enforced. Subject
+whitespace normalization mirrored sink-side in smtp_send.py is deferred to the
+next coordinated Modal redeploy (client-side strip covers the only new writer).

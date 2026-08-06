@@ -1,7 +1,7 @@
 import Foundation
 
 /// Deterministically turns lead rows into a `Dashboard` (layout + widget data).
-/// Builds its own `LayoutPlan` inline (like `CampaignBuilder`/`PipelineBuilder`) —
+/// Builds its own `LayoutPlan` inline (like `PipelineBuilder`) —
 /// the Haiku layout engine was removed (P1 renovation): same data now always
 /// renders the same arrangement. Pure/synchronous and side-effect free.
 enum DashboardBuilder {

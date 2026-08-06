@@ -5,7 +5,7 @@ struct RootView: View {
     @State private var campaignModel = CampaignDashboardViewModel()
     @State private var pipelineModel = PipelineDashboardViewModel()
     @State private var inspectorModel = LeadInspectorModel()
-    @State private var campaignInspectorModel = CampaignInspectorModel()
+    @State private var campaignDrill = CampaignDrillModel()
     @State private var backlogModel = BacklogViewModel()
     // One profile seam for every tab: rows set `presenter.active`, this view
     // presents the sheet (P3).
@@ -55,11 +55,14 @@ struct RootView: View {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
             if Task.isCancelled { break }
             // Refresh concurrently — independent tables, each guards its own
-            // in-flight refresh, so there's no ordering dependency.
+            // in-flight refresh, so there's no ordering dependency. The drill
+            // refresh is in-place (no clearing), so an open drill's rows stay
+            // as fresh as the header above them.
             async let leads: Void = model.load()
             async let campaigns: Void = campaignModel.load()
+            async let drilled: Void = campaignDrill.refreshLevel()
             async let backlog: Void = backlogModel.load()
-            _ = await (leads, campaigns, backlog)
+            _ = await (leads, campaigns, drilled, backlog)
         }
     }
 
@@ -123,35 +126,33 @@ struct RootView: View {
         )
     }
 
-    // MARK: - Campaigns tab (fixed deterministic layout; no Re-layout button)
+    // MARK: - Campaigns tab (drill-down: campaigns → leads → correspondence)
 
     @ViewBuilder
     private var campaignsTab: some View {
-        switch campaignModel.state {
-        case .idle, .loading:
-            LoadingView()
-        case .loaded(let dashboard):
-            campaignsSplit(dashboard: dashboard, staleMessage: nil)
-        case .stale(let dashboard, _, let message):
-            campaignsSplit(dashboard: dashboard, staleMessage: message)
-        case .failed(let message):
-            ErrorView(message: message, onRetry: { Task { await campaignModel.load() } })
-        }
-    }
-
-    /// Aggregate dashboard on top, campaign inspector below (P4) — the same
-    /// VSplitView shape as the Pipeline tab.
-    private func campaignsSplit(dashboard: Dashboard, staleMessage: String?) -> some View {
-        VSplitView {
-            DashboardShell(
-                dashboard: dashboard, title: "Campaigns", isRefreshing: campaignModel.isRefreshing,
-                staleMessage: staleMessage,
-                onRefresh: { Task { await campaignModel.load() } }
+        // loaded and stale share ONE structural arm (same S05 lesson as the
+        // Leads tab): a transient refresh failure must not reset the drill.
+        if let inputs = campaignModel.state.value {
+            ABCampaignsView(
+                inputs: inputs,
+                drill: campaignDrill,
+                // Refresh reaches the CURRENT drill level too — a header that
+                // refreshes over rows that don't is two ages on one screen
+                // (state-machine review F2).
+                onRefresh: { Task {
+                    async let level1: Void = campaignModel.load()
+                    async let drilled: Void = campaignDrill.refreshLevel()
+                    _ = await (level1, drilled)
+                } },
+                isRefreshing: campaignModel.isRefreshing,
+                staleMessage: campaignModel.state.staleMessage
             )
-            .frame(minHeight: 240)
-            CampaignInspectorView(model: campaignInspectorModel,
-                                  summaries: campaignModel.summaries)
-                .frame(minHeight: 180, idealHeight: 300)
+        } else if case .failed(let message) = campaignModel.state {
+            ABErrorView(message: message,
+                        onRetry: { Task { await campaignModel.load() } },
+                        noun: "campaigns")
+        } else {
+            ABLoadingView(noun: "campaigns")
         }
     }
 

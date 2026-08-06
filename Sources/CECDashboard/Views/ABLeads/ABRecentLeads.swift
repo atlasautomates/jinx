@@ -6,7 +6,20 @@ import SwiftUI
 
 struct ABStatusPill: View {
     let status: String
-    private var role: ABStatusRole { ABStatusRole(status) }
+    private let role: ABStatusRole
+
+    /// Leads-tab statuses map through `ABStatusRole(_:)`.
+    init(status: String) {
+        self.status = status
+        self.role = ABStatusRole(status)
+    }
+
+    /// Same pill, caller-supplied role — for vocabularies with their own
+    /// status→role mapping (campaign + send-queue statuses).
+    init(text: String, role: ABStatusRole) {
+        self.status = text
+        self.role = role
+    }
 
     private var fg: Color {
         switch role {
