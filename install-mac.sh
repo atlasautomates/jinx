@@ -22,7 +22,9 @@ osascript -e 'quit app "CECDashboard"' 2>/dev/null || true
 rm -rf /Applications/CECDashboard.app
 ditto "$APP" /Applications/CECDashboard.app
 
-codesign -dvv /Applications/CECDashboard.app 2>&1 | grep -q "Authority=Developer ID Application" \
+# Plain grep (not -q): under `pipefail`, grep -q's early exit SIGPIPEs
+# codesign and fails the pipeline even on a match (2026-08-05 false FAIL).
+codesign -dvv /Applications/CECDashboard.app 2>&1 | grep "Authority=Developer ID Application" >/dev/null \
   || { echo "FAIL: installed app is not Developer-ID signed"; exit 1; }
 # Acceptance: headless query must answer WITHOUT a Keychain prompt (grant survived).
 OUT="$(/Applications/CECDashboard.app/Contents/MacOS/CECDashboard --query count 2>&1 || true)"
