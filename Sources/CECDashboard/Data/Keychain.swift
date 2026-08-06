@@ -4,6 +4,20 @@ import Security
 /// Minimal macOS Keychain access for the Supabase API key.
 /// The key is NEVER stored in source, env defaults, or logs — only the Keychain.
 enum Keychain {
+    /// Attributes-only presence probe — never materializes the secret into a
+    /// String just to test existence (security review: the full-read probe
+    /// heap-allocates an unzeroed service key on every view appearance).
+    static func exists(service: String, account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: false,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
     /// Read a generic-password item. Returns nil if absent or empty (fail-closed).
     static func read(service: String, account: String) -> String? {
         let query: [String: Any] = [

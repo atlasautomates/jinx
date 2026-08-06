@@ -193,7 +193,7 @@ enum SelfTest {
         // ── Healing backlog: BacklogRepository.compose (P6) ─────────────────────────
         problems.append(contentsOf: backlogComposeChecks())
 
-        // ── Campaigns tab: CampaignsRepository.compose + CampaignBuilder ────────────
+        // ── Campaigns tab: CampaignsRepository compose seams + drill mappings ───────
         // The compose path is pure (no I/O), so we exercise the join/binding edge cases
         // here rather than against the live DB.
         problems.append(contentsOf: campaignChecks())
@@ -1509,7 +1509,7 @@ enum SelfTest {
         func interaction(_ at: String?, direction: String,
                          sentiment: String? = nil) -> LeadInteractionRow {
             LeadInteractionRow(
-                interactionType: "email", direction: direction, subject: "s",
+                id: nil, interactionType: "email", direction: direction, subject: "s",
                 summary: nil, transcript: nil,
                 metadata: sentiment.map { .object(["sentiment": .string($0),
                                                    "intent": .string("question")]) },
@@ -1558,7 +1558,7 @@ enum SelfTest {
         let doubleEncoded = ProfileRepository.compose(
             lead: lead, enrichment: (nil, ok: true),
             interactions: ([LeadInteractionRow(
-                interactionType: "email", direction: "inbound", subject: nil,
+                id: nil, interactionType: "email", direction: "inbound", subject: nil,
                 summary: nil, transcript: nil,
                 metadata: .string(#"{"sentiment": "positive", "intent": "interested"}"#),
                 source: nil, interactionAt: "2026-07-01T10:00:00+00:00")], ok: true))
@@ -1571,7 +1571,7 @@ enum SelfTest {
         let noMeta = ProfileRepository.compose(
             lead: lead, enrichment: (nil, ok: true),
             interactions: ([LeadInteractionRow(
-                interactionType: "email", direction: "inbound", subject: nil,
+                id: nil, interactionType: "email", direction: "inbound", subject: nil,
                 summary: nil, transcript: nil, metadata: .string("oops"),
                 source: nil, interactionAt: "t")], ok: true))
         if noMeta.sentiment != nil {
@@ -1875,12 +1875,9 @@ enum SelfTest {
 
         // Empty in → empty out, not partial; the table renders with zero rows.
         let empty = CampaignsRepository.compose(
-            campaigns: [], tracking: [], leadRows: [], sendRows: [], partial: false)
+            campaigns: [], tracking: [], leadRows: [], partial: false)
         if !empty.summaries.isEmpty || empty.partial {
             problems.append("campaigns: empty compose should be empty + not partial")
-        }
-        if case .table(let t)? = CampaignBuilder.build(empty).widgets["campaigns-table"], !t.rows.isEmpty {
-            problems.append("campaigns: empty build should yield a 0-row table")
         }
 
         // Fixture: tracking wins for matched names; roster fills the rest; two unnamed
@@ -1904,14 +1901,8 @@ enum SelfTest {
             CampaignLeadRow(campaignId: "c3", status: "weirdstatus"), CampaignLeadRow(campaignId: "c3", status: "weirdstatus"),
             CampaignLeadRow(campaignId: "c4", status: "pending"),
         ]
-        let sendRows = [
-            SendQueueRow(campaignId: "c1", sendingAccount: "a@x.com", status: "sent"),
-            SendQueueRow(campaignId: "c1", sendingAccount: "a@x.com", status: "sent"),
-            SendQueueRow(campaignId: "c3", sendingAccount: "b@x.com", status: "sent"),
-            SendQueueRow(campaignId: "c4", sendingAccount: "a@x.com", status: "pending"),  // not 'sent' → ignored
-        ]
         let inputs = CampaignsRepository.compose(
-            campaigns: campaigns, tracking: tracking, leadRows: leadRows, sendRows: sendRows, partial: false)
+            campaigns: campaigns, tracking: tracking, leadRows: leadRows, partial: false)
         let byId = Dictionary(uniqueKeysWithValues: inputs.summaries.map { ($0.id, $0) })
 
         // Matched name → tracking sent/replies (NOT roster's 2 sent / 1 reply).
@@ -1930,47 +1921,31 @@ enum SelfTest {
             problems.append("campaigns: second unnamed campaign should not share c3/decoy numbers")
         }
 
-        let built = CampaignBuilder.build(inputs)
-        // Aggregate KPIs: 3 active, sent 100+50+4+0 = 154.
-        if case .kpi(let k)? = built.widgets["kpi-active"], Int(k.value) != 3 {
-            problems.append("campaigns: active-campaign KPI should be 3 (got \(Int(k.value)))")
+        // Reply-rate zero guard: c4 (sent=0) must yield nil (renders "—").
+        if byId["c4"]?.replyRatePercent != nil {
+            problems.append("campaigns: zero-sent campaign should have nil reply rate")
         }
-        if case .kpi(let k)? = built.widgets["kpi-sent"], Int(k.value) != 154 {
-            problems.append("campaigns: emails-sent KPI should sum to 154 (got \(Int(k.value)))")
-        }
-        // Non-canonical statuses roll into an "Other" group on the funnel.
-        if case .statusBoard(let b)? = built.widgets["funnel-c3"] {
-            if !b.groups.contains(where: { $0.label == "Other" && $0.count == 2 }) {
-                problems.append("campaigns: non-canonical statuses should roll into 'Other' (count 2)")
-            }
-        } else {
-            problems.append("campaigns: c3 should have a funnel status board")
-        }
-        // by-account counts only delivered sends (a@x.com=2, b@x.com=1; the pending row drops).
-        if case .statusBoard(let b)? = built.widgets["by-account"] {
-            let total = b.groups.reduce(0) { $0 + $1.count }
-            if total != 3 { problems.append("campaigns: by-account should count 3 sent (got \(total))") }
-        } else {
-            problems.append("campaigns: by-account status board missing")
-        }
-        // Reply-rate zero guard: exactly one campaign (c4, sent=0) renders "—".
-        if case .table(let t)? = built.widgets["campaigns-table"] {
-            let dashes = t.rows.filter { if case .string("—")? = $0["reply_rate"] { return true }; return false }.count
-            if dashes != 1 {
-                problems.append("campaigns: exactly one zero-sent campaign should show '—' reply rate (got \(dashes))")
-            }
-            if t.title.contains("partial") {
-                problems.append("campaigns: non-partial load should not mark the table partial")
-            }
-        } else {
-            problems.append("campaigns: campaigns-table should be a table")
+        // partial=true must survive compose (the drill header captions it).
+        let degraded = CampaignsRepository.compose(
+            campaigns: campaigns, tracking: tracking, leadRows: leadRows, partial: true)
+        if !degraded.partial {
+            problems.append("campaigns: partial flag must survive compose")
         }
 
-        // partial=true surfaces in the table title (degraded/truncated honesty).
-        let degraded = CampaignsRepository.compose(
-            campaigns: campaigns, tracking: tracking, leadRows: leadRows, sendRows: sendRows, partial: true)
-        if case .table(let t)? = CampaignBuilder.build(degraded).widgets["campaigns-table"], !t.title.contains("partial") {
-            problems.append("campaigns: partial load should mark the table title 'partial'")
+        // ── Funnel chips (drill level 2): canonical order + Other rollup ─────
+        // "Sent" (capitalized) must case-fold into the canonical bucket, not
+        // vanish from both branches (QA adversarial finding).
+        let funnel = ABCampaignLeadsView.funnelEntries(
+            ["pending": 1, "Sent": 4, "weirdstatus": 2, "heldover": 1])
+        if funnel.map(\.label) != ["Pending", "Sent", "Other"] {
+            problems.append("campaigns: funnel should keep canonical order, case-fold "
+                + "keys, + roll non-canonical into Other (got \(funnel.map(\.label)))")
+        }
+        if funnel.last?.count != 3 {
+            problems.append("campaigns: Other should sum non-canonical counts (got \(funnel.last?.count ?? -1))")
+        }
+        if ABCampaignLeadsView.funnelEntries([:]).isEmpty == false {
+            problems.append("campaigns: empty funnel should have no chips")
         }
 
         // ── Roster left-join (P4 inspector) ─────────────────────────────────
@@ -1997,6 +1972,186 @@ enum SelfTest {
         }
         if CampaignsRepository.composeRoster(rows: [], names: [:]).isEmpty == false {
             problems.append("campaigns: empty roster must compose empty")
+        }
+
+        // ── Correspondence merge (drill level 3) ─────────────────────────────
+        func interaction(_ at: String?, dir: String, id: String? = "pk-\(UUID().uuidString.prefix(8))",
+                         subject: String? = nil,
+                         transcript: String? = nil, summary: String? = nil,
+                         meta: JSONValue? = nil) -> LeadInteractionRow {
+            LeadInteractionRow(id: id, interactionType: "email", direction: dir,
+                               subject: subject, summary: summary,
+                               transcript: transcript, metadata: meta,
+                               source: "test", interactionAt: at)
+        }
+        func queueRow(_ id: String, status: String, step: Int = 2,
+                      scheduled: String? = nil,
+                      sent: String? = nil, body: String? = nil) -> SendQueueDetailRow {
+            SendQueueDetailRow(id: id, stepNumber: step, variantIndex: nil,
+                               sendingAccount: "a@x.com", status: status,
+                               scheduledAt: scheduled, sentAt: sent,
+                               toEmail: "l@y.com", error: nil,
+                               subjectOverride: nil, bodyOverride: body)
+        }
+
+        let (merged, mergedTruncated) = CampaignsRepository.composeCorrespondence(
+            campaignId: "c1",
+            interactions: [   // newest-first, as fetched
+                interaction("2026-06-06T02:00:00+00:00", dir: "inbound", id: "pk-in",
+                            transcript: "the reply text"),
+                // NUMERIC metadata — the shape ce-outbound actually writes
+                // (step_number/variant_index as JSON numbers, QA driver A3):
+                // dedupe reads queue_id, attribution reads the numbers.
+                interaction("2026-06-05T15:00:00+00:00", dir: "outbound", id: "pk-out",
+                            subject: "step 1",
+                            meta: .object(["queue_id": .string("q-sent"),
+                                           "campaign_id": .string("c2"),
+                                           "step_number": .number(1),
+                                           "variant_index": .number(2)])),
+                // Legacy outbound archive: NO queue_id (predates stamping),
+                // numeric step via DOUBLE-ENCODED metadata.
+                interaction("2026-06-01T10:00:30+00:00", dir: "outbound", id: "pk-legacy",
+                            subject: "step 3 legacy",
+                            meta: .string(#"{"step_number":3,"campaign_id":"c1"}"#)),
+            ],
+            queue: [
+                queueRow("q-sent", status: "sent", sent: "2026-06-05T15:00:00+00:00"),    // archived → dropped
+                queueRow("q-legacy", status: "sent", step: 3,
+                         sent: "2026-06-01T10:01:00+00:00"),  // no queue_id, but same step ±180s → fuzzy-deduped
+                queueRow("q-orphan", status: "sent", step: 9,
+                         sent: "2026-05-01T10:00:00+00:00"),  // no archive anywhere → kept
+                queueRow("q-bounced", status: "failed", sent: "2026-06-07T00:00:00+00:00"),
+                queueRow("q-staged", status: "pending", scheduled: "2026-06-12T16:00:00+00:00",
+                         body: "override body"),
+            ])
+        if mergedTruncated {
+            problems.append("correspondence: under-cap merge must not flag truncated")
+        }
+        if merged.map(\.id).contains("sq-q-sent") {
+            problems.append("correspondence: archived sent queue row must dedupe out")
+        }
+        if merged.map(\.id).contains("sq-q-legacy") {
+            problems.append("correspondence: legacy sent row (same step, Δt<180s vs outbound archive) must fuzzy-dedupe")
+        }
+        if !merged.map(\.id).contains("sq-q-orphan") {
+            problems.append("correspondence: unarchived sent queue row must render")
+        }
+        if merged.first?.id != "sq-q-orphan" || merged.last?.isStaged != true {
+            problems.append("correspondence: must sort ascending (orphan first, staged last) "
+                + "— got \(merged.map(\.id))")
+        }
+        if merged.last?.body != "override body" || merged.last?.bodyUnreadable != false {
+            problems.append("correspondence: body_override must render on staged rows")
+        }
+        // q-bounced: failed + archived queue_id? No — its id isn't in any
+        // metadata, so it stays "failed". Bounce synthesis needs the archive:
+        let (bounceMerge, _) = CampaignsRepository.composeCorrespondence(
+            campaignId: "c1",
+            interactions: [interaction("2026-06-05T15:00:00+00:00", dir: "outbound", id: "pk-b",
+                                       subject: "s",
+                                       meta: .object(["queue_id": .string("q-b")]))],
+            queue: [queueRow("q-b", status: "failed", sent: "2026-06-05T15:00:00+00:00")])
+        if bounceMerge.first(where: { $0.id == "sq-q-b" })?.queueStatus != "bounced" {
+            problems.append("correspondence: failed row with archived send must synthesize 'bounced'")
+        }
+        let outbound = merged.first { $0.id == "int-pk-out" }
+        if outbound == nil {
+            problems.append("correspondence: interaction ids must derive from the PK (int-pk-out missing: \(merged.map(\.id)))")
+        }
+        if outbound?.stepNumber != 1 || outbound?.variantIndex != 2 {
+            problems.append("correspondence: NUMERIC metadata step/variant must surface (got \(String(describing: outbound?.stepNumber))/\(String(describing: outbound?.variantIndex)))")
+        }
+        if outbound?.bodyUnreadable != true {
+            problems.append("correspondence: subject-only outbound archive must flag bodyUnreadable")
+        }
+        if outbound?.fromOtherCampaign != true {
+            problems.append("correspondence: metadata campaign c2 ≠ drill c1 must flag fromOtherCampaign")
+        }
+        let inbound = merged.first { $0.direction == "inbound" }
+        if inbound?.body != "the reply text" || inbound?.fromOtherCampaign != false {
+            problems.append("correspondence: inbound transcript/campaign flags wrong")
+        }
+        if CampaignsRepository.composeCorrespondence(
+            campaignId: "c1", interactions: [], queue: []).items.isEmpty == false {
+            problems.append("correspondence: empty in must compose empty")
+        }
+
+        // Card labels: the role mappings the timeline colors hang off.
+        if let staged = merged.last, ABCorrespondenceView.cardLabel(staged).text != "Staged" {
+            problems.append("correspondence: pending queue row should label 'Staged'")
+        }
+        if inbound.map(ABCorrespondenceView.cardLabel)?.role != .reward {
+            problems.append("correspondence: inbound must carry the reward role")
+        }
+        if ABCorrespondenceView.cardLabel(CorrespondenceItem(
+            id: "sq-x", kind: .queued, queueId: "x", direction: nil,
+            queueStatus: "sending", subject: nil, body: nil, bodyUnreadable: true,
+            stepNumber: nil, variantIndex: nil, sendingAccount: nil, toEmail: nil,
+            error: nil, date: nil, timestamp: nil, fromOtherCampaign: false)).text != "Sending" {
+            problems.append("correspondence: 'sending' must label as Sending (in-flight), not fall to default")
+        }
+
+        // Step/angle wording: variant_index is the step-1 ANGLE; on later
+        // steps it's attribution, never the copy variant (sender contract).
+        if ABCorrespondenceView.stepLabel(step: 1, variantIndex: 0) != "step 1 · angle A"
+            || ABCorrespondenceView.stepLabel(step: 2, variantIndex: 2) != "step 2 · angle C attributed"
+            || ABCorrespondenceView.stepLabel(step: 2, variantIndex: nil) != "step 2"
+            || ABCorrespondenceView.stepLabel(step: nil, variantIndex: 1) != nil {
+            problems.append("correspondence: stepLabel angle wording regressed")
+        }
+
+        // ── The write path's guard triple (the only barrier between the write
+        // credential and a project-wide send_queue rewrite) ──────────────────
+        let goodId = "abcdef12-3456-7890-abcd-ef1234567890"
+        let u = SupabaseWriteClient.stagedCopyURL(
+            base: SupabaseConfig.restURL, queueId: goodId)?.absoluteString ?? ""
+        for required in ["id=eq.\(goodId)", "status=eq.pending", "claimed_at=is.null"]
+        where !u.contains(required) {
+            problems.append("write: staged-copy PATCH lost its \(required) guard (url: \(u))")
+        }
+        for badId in ["", "abc", "x'; DROP--", "abcdef12-3456-7890-abcd-ef1234567890,status=eq.sent"]
+        where SupabaseWriteClient.stagedCopyURL(base: SupabaseConfig.restURL, queueId: badId) != nil {
+            problems.append("write: non-UUID queue id '\(badId)' must not produce a PATCH URL")
+        }
+        // Subject header hygiene: newlines/control chars can never reach the
+        // SMTP header line (bare-\n malformed-header incident class).
+        if SupabaseWriteClient.sanitizedSubject("hi\nBcc: a@evil.com") != "hi Bcc: a@evil.com" {
+            problems.append("write: sanitizedSubject must fold newlines to spaces")
+        }
+        if SupabaseWriteClient.sanitizedSubject("a\r\nb\u{07}c") != "a bc" {
+            problems.append("write: sanitizedSubject must strip control characters")
+        }
+        if SupabaseWriteClient.sanitizedSubject("  \n ") != nil {
+            problems.append("write: whitespace-only subject must clear to nil")
+        }
+        if SupabaseWriteClient.sanitizedSubject("plain subject") != "plain subject" {
+            problems.append("write: sanitizedSubject must pass clean subjects through")
+        }
+
+        // ── Revision lint (sender contract: unknown slots + stripped links) ──
+        // The allow decision mirrors _OWN_LINK_RE exactly: https-only,
+        // apex-or-www, full token (delta review — the loose form let
+        // bare/http/www first-party links through to be mangled at the sink).
+        if RevisionLint.problem(subject: nil, body: "Hey {{greetingLine}},\nsee https://atlasautomates.com/work") != nil {
+            problems.append("lint: known slot + strict-form first-party link must pass")
+        }
+        for mangled in ["see atlasautomates.com/work", "http://atlasautomates.com/x",
+                        "www.atlasautomates.com/x", "atlasautomates.com.evil.io/x",
+                        "check foo.biz now"]
+        where RevisionLint.problem(subject: nil, body: mangled) == nil {
+            problems.append("lint: '\(mangled)' must be refused (sender strips/mangles it)")
+        }
+        if RevisionLint.problem(subject: nil, body: "Hey {{ greetingLine }},") == nil {
+            problems.append("lint: spaced slot (sender substitution would miss it) must be refused")
+        }
+        if RevisionLint.problem(subject: nil, body: "Hey {{firstName}},") == nil {
+            problems.append("lint: unknown slot must be refused (would ship literal braces)")
+        }
+        if RevisionLint.problem(subject: nil, body: "book at calendly.com/adrian") == nil {
+            problems.append("lint: foreign link must be refused (sender strips it silently)")
+        }
+        if RevisionLint.problem(subject: "https://evil.example.com deal", body: nil) == nil {
+            problems.append("lint: foreign link in subject must be refused")
         }
 
         return problems

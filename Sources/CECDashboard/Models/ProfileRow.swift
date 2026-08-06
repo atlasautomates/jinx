@@ -79,6 +79,9 @@ struct LeadEnrichmentRow: Codable {
 /// (verified live), not `type`. `metadata` is free-form jsonb — sentiment and
 /// intent live inside it on inbound rows.
 struct LeadInteractionRow: Codable {
+    /// Primary key — selected by the correspondence read for stable timeline
+    /// identity; the profile read omits it (older call site), so optional.
+    let id: String?
     let interactionType: String?
     let direction: String?
     let subject: String?
@@ -89,7 +92,7 @@ struct LeadInteractionRow: Codable {
     let interactionAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case direction, subject, summary, transcript, metadata, source
+        case id, direction, subject, summary, transcript, metadata, source
         case interactionType = "interaction_type"
         case interactionAt = "interaction_at"
     }
@@ -98,6 +101,9 @@ struct LeadInteractionRow: Codable {
     /// Production metadata is DOUBLE-ENCODED — a JSON string inside the jsonb
     /// column (QA live finding) — so mirror lookup_profile.py's
     /// json.loads-on-string before reading keys; plain objects still work.
+    /// JSON NUMBERS also surface (integer-formatted): ce-outbound writes
+    /// step_number/variant_index as numbers, and a string-only reader renders
+    /// them nil forever (QA adversarial driver, 2026-08-05).
     func meta(_ key: String) -> String? {
         var value = metadata
         if case .string(let s)? = value,
@@ -105,9 +111,16 @@ struct LeadInteractionRow: Codable {
            let decoded = try? JSONDecoder().decode(JSONValue.self, from: data) {
             value = decoded
         }
-        guard case .object(let o)? = value, case .string(let s)? = o[key]
-        else { return nil }
-        return s.nilIfEmpty
+        guard case .object(let o)? = value else { return nil }
+        switch o[key] {
+        case .string(let s)?:
+            return s.nilIfEmpty
+        case .number(let d)?:
+            // Same integer rendering as JSONValue.render (no trailing .0).
+            return d == d.rounded() && abs(d) < 1e15 ? String(Int64(d)) : String(d)
+        default:
+            return nil
+        }
     }
 }
 

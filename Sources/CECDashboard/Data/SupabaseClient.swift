@@ -17,7 +17,9 @@ func isCancellation(_ error: Error) -> Bool {
 }
 
 /// Thin, read-only PostgREST client over URLSession (no third-party dependency).
-/// Only issues GETs — the dashboard never writes.
+/// Only issues GETs. The single sanctioned write in the app (staged-copy
+/// revisions) lives in `SupabaseWriteClient` behind its own Keychain item —
+/// never add write methods here.
 struct SupabaseClient {
     enum ClientError: Error, LocalizedError {
         case missingKey
