@@ -13,9 +13,11 @@ import Foundation
 ///    would silently vanish from the sent email while the dashboard forever
 ///    displays it as sent. Refuse instead.
 ///
-/// The slot list mirrors MERGE_VAR_MAP + the derived vars in
-/// ce-outbound/scripts/modal_app.py (build_merge_vars). If the sender grows a
-/// slot, add it here — the SelfTest pin will remind whoever touches this.
+/// The slot list mirrors the canonical vocabulary in
+/// ce-outbound/scripts/merge_vars.py (MERGE_VAR_MAP + ACCOUNT_DERIVED_VARS +
+/// LEAD_DERIVED_GATED_VARS; the modal_app literal retired at 4.11). If the
+/// sender grows a slot, add it here — `ce doctor`'s merge-var-sync check
+/// parses this literal as a satellite and FAILS on drift.
 enum RevisionLint {
     static let knownSlots: Set<String> = [
         "casualizedFirstName", "casualizedCompanyName", "casualizedCityName",
