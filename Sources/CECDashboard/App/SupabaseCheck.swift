@@ -82,7 +82,7 @@ enum SupabaseCheck {
                     + (interactionsOK ? ", lead_interactions readable"
                        : ", lead_interactions read FAILED (missing lead_interactions_anon_read migration?)")
                     + (backlogOK ? ", backlog tables readable"
-                       : ", backlog tables UNREADABLE (campaign_leads / v_campaign_ready)")
+                       : ", backlog tables UNREADABLE (campaign_leads)")
                 // First page only (this is a readability probe, not a tally) — so
                 // every count below is a floor, spelled "≥".
                 let sentLeads = Set(messaged.events.map(\.leadID)).count

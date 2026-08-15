@@ -58,11 +58,12 @@ struct BacklogRepository {
     /// it needs to prove the tables are readable, not tally them).
     func readProbe() async -> Bool {
         do {
+            // v_campaign_ready was DROPPED at 5.1 (one-method ruling): the
+            // eligibility question is answered ONLY by Python's
+            // contracts.is_campaign_ready. The backlog listing below still
+            // targets the dropped view and shows its error state until the
+            // 7.2 dashboard remap feeds it from the one method's output.
             _ = try await client.get("campaign_leads", [
-                URLQueryItem(name: "select", value: "lead_id"),
-                URLQueryItem(name: "limit", value: "1"),
-            ])
-            _ = try await client.get("v_campaign_ready", [
                 URLQueryItem(name: "select", value: "lead_id"),
                 URLQueryItem(name: "limit", value: "1"),
             ])
