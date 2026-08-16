@@ -25,9 +25,14 @@ struct RootView: View {
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
+    /// Captured into the app delegate's reopen bridge: ⌘W destroys the Window
+    /// scene's NSWindow, and only the scene system can recreate it (see
+    /// CECAppDelegate.applicationShouldHandleReopen).
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         leadsSurface
+            .onAppear { CECAppDelegate.reopenMainWindow = { openWindow(id: "main") } }
             .preferredColorScheme(.dark)
             .frame(minWidth: 820, minHeight: 600)
             .environment(profilePresenter)

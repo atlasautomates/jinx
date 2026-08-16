@@ -437,3 +437,31 @@ asserts on a captured wire request that apikey carries the anon value and
 Authorization carries the bearer — the mirror of the Python factory's
 AuthMechanism pins. Second install: acceptance PASSED ("You have 3455
 leads."), live `--check-supabase` all-OK with `credential: expires in 359d`.
+
+### ⌘W lifecycle + prune (2026-08-16, post-b1c9dab, live user report)
+
+Adrian: multiple app copies visible + ⌘W killed the app (no Dock reopen) +
+blank icon. Fixes, each measured live:
+- PRUNE: Spotlight/Launchpad were surfacing 3 build-dir bundles (v1 Jun 26,
+  v2 Debug Aug 5 = PRE-REMAP, v3 build product) beside the one real install —
+  deleted + lsregister'd; exactly one copy remains.
+- ⌘W: SwiftUI answers terminate-after-last-window TRUE for a closed-scene app
+  unless the adaptor overrides (disableAutomaticTermination alone measured
+  insufficient — and is likely a no-op: no NSSupportsAutomaticTermination in
+  the plist; kept as belt). AND SwiftUI does not forward
+  applicationShouldHandleReopen to the adaptor (measured never firing), AND
+  ⌘W destroys the Window scene's NSWindow — so reopen rides a didBecomeActive
+  observer → bridged openWindow(id:"main") captured by RootView.onAppear.
+  Verified end-to-end twice with real keystrokes. Guard = main-window-only
+  visibility (a sheet/Settings window can't disable reopen; a minimized main
+  window restores itself); reopen failure logs an actionable line (a stuck
+  resident process must name itself). Selftest pin on the terminate override.
+- FRAGILE SEAM (unpinnable): the bridged OpenWindowAction outlives its scene —
+  works today, undocumented contract. MANUAL REGRESSION at every install:
+  launch → ⌘W → WAIT >10s → Dock click → window must return.
+- Residency consequences: install-mac.sh's osascript quit is now load-bearing
+  every install (already warns on TCC denial); a background Siri intent launch
+  leaves a resident process (by design — it serves the next query instantly).
+- Icon: bundle resources verified intact (AppIcon.icns + Assets.car + both
+  plist keys) — blank icon = stale icon cache; user-level flush applied.
+  If it recurs: sudo rm -rf /Library/Caches/com.apple.iconservices.store.

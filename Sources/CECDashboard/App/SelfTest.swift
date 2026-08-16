@@ -52,6 +52,15 @@ enum SelfTest {
         // ── Pinned leads: PinsStore (P5) ────────────────────────────────────────────
         problems.append(contentsOf: pinsChecks())
 
+        // ⌘W lifecycle pin (review 2026-08-16): SwiftUI terminates a
+        // closed-scene app unless the adaptor answers false here — flipping
+        // this back to true is exactly the "closes and never comes back"
+        // report, and the only other thing holding it is a comment.
+        if CECAppDelegate().applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared) {
+            problems.append("lifecycle: applicationShouldTerminateAfterLastWindowClosed must be "
+                + "false — the app dies on ⌘W and the Dock has nothing to reopen")
+        }
+
         // (Backlog/Campaigns/Pipeline check families left with their tabs — 7.2.)
 
         // ── Leads tab: live DashboardInputs → ABLeadsData mapping (pure/total) ──────

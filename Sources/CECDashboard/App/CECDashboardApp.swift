@@ -1,18 +1,90 @@
 import SwiftUI
 import AppKit
 
-/// Dock-reopen fallback for the single `Window` scene: `WindowGroup` gave two
-/// ways back to a closed window (⌘N + Dock); `Window` removes ⌘N, and if the
-/// system's default reopen handling ever fails to restore the scene the app
-/// would be a running process with no recoverable UI (contention lens). This
-/// makes the reopen path explicit: surface the retained window if one exists.
+/// Dock-reopen for the single `Window` scene. Measured 2026-08-16: ⌘W
+/// DESTROYS the scene's NSWindow (the app's window list goes empty), SwiftUI
+/// answers terminate-after-last-window as true unless overridden below, and
+/// the reopen delegate callback is NOT forwarded to this adaptor — so revival
+/// is a didBecomeActive observer calling a bridged `openWindow(id: "main")`.
 final class CECAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // UNPROVEN BELT: Info.plist carries no NSSupportsAutomaticTermination,
+        // so this is very likely a no-op (review 2026-08-16) — the measured
+        // load-bearing half is applicationShouldTerminateAfterLastWindowClosed
+        // below. Kept as cheap insurance against a future SwiftUI opt-in.
+        ProcessInfo.processInfo.disableAutomaticTermination(
+            "single-window dashboard: stay resident for Dock reopen")
+        // Reopen via ACTIVATION, not the reopen delegate callback: SwiftUI's
+        // internal application delegate does not reliably forward
+        // applicationShouldHandleReopen to the adaptor (measured live — the
+        // handler below never fired on a Dock-click-equivalent reopen). A
+        // Dock click always ACTIVATES the app, and a plain NotificationCenter
+        // observer involves no delegate forwarding at all. openWindow(id:) on
+        // an already-visible Window scene just focuses it, so the at-launch
+        // firing is harmless.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                // MAIN-window visibility only: an auxiliary window (a lingering
+                // sheet host, a future Settings scene) must not disable reopen,
+                // and a MINIATURIZED main window reads !isVisible but restores
+                // itself on Dock click — don't double-handle it (review).
+                let mainAlive = NSApp.windows.contains {
+                    ($0.isVisible || $0.isMiniaturized) && $0.canBecomeMain
+                }
+                guard !mainAlive else { return }
+                NSLog("CECAppDelegate: %@", "activation with no main window — reopening")
+                CECAppDelegate.reopenMainWindow?()
+                // FAILURE SIGNAL: with terminate-after-close overridden, a
+                // reopen that no-ops leaves a resident process whose only
+                // escape is Force Quit — that state must at least name itself
+                // (review MEDIUM: the old failure mode was a clean exit, this
+                // one is a stuck process).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    if !NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) {
+                        NSLog("CECAppDelegate: %@",
+                              "reopen FAILED — app is resident with no window; the "
+                              + "openWindow bridge did not revive the scene (SwiftUI "
+                              + "behavior change?). Quit and relaunch; see SHIP-NOTES.")
+                    }
+                }
+            }
+        }
+    }
+
+    // disableAutomaticTermination alone was NOT enough — measured live
+    // 2026-08-16: a real ⌘W still killed the process within 6s, because
+    // SwiftUI answers this delegate query with true for a closed-scene app
+    // unless the adaptor overrides it. This is the load-bearing half.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    /// Bridge to SwiftUI's `openWindow(id: "main")`, captured by RootView on
+    /// first appear. Needed because closing a `Window` scene DESTROYS its
+    /// NSWindow (measured live: after ⌘W the app's window list is empty), so
+    /// there is nothing to `makeKeyAndOrderFront` and SwiftUI does not
+    /// recreate the scene from a bare reopen event — the only working revival
+    /// is the scene system's own OpenWindowAction. `@MainActor`: written from
+    /// RootView.onAppear, read on main-queue paths — enforced, not assumed.
+    @MainActor static var reopenMainWindow: (() -> Void)?
+
+    // MEASURED NOT TO FIRE as of 2026-08-16 (SwiftUI's internal delegate does
+    // not forward this to the adaptor) — kept as the API-documented belt; the
+    // didBecomeActive observer above is the live path.
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows: Bool) -> Bool {
+        NSLog("CECAppDelegate: %@", "reopen callback fired (visible=\(hasVisibleWindows))")
         if !hasVisibleWindows {
-            sender.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
+            if let window = sender.windows.first(where: { $0.canBecomeKey }) {
+                window.makeKeyAndOrderFront(nil)   // hidden-but-alive window
+            } else {
+                Self.reopenMainWindow?()           // scene destroyed → recreate
+            }
         }
-        return true   // let SwiftUI's own scene restoration run too
+        return true
     }
 }
 
