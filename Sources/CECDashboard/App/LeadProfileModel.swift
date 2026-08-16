@@ -28,8 +28,7 @@ final class LeadProfileModel {
         isLoading = true
         defer { if gen == generation { isLoading = false } }
         do {
-            let repo = ProfileRepository(client: try SupabaseClient.make())
-            let fetched = try await repo.fetch(ref)
+            let fetched = try await Self.liveFetch(ref)
             guard gen == generation else { return }   // superseded
             inputs = fetched
         } catch {
@@ -40,5 +39,15 @@ final class LeadProfileModel {
             message = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
         }
+    }
+
+    /// Hoisted off the main actor — `SupabaseClient.make()` is a synchronous
+    /// `SecItemCopyMatching` that can block and can PROMPT, and this model is
+    /// `@MainActor`; building the client inline beachballed the whole UI with
+    /// the prompt behind a modal sheet (contention lens — the one seam the
+    /// DashboardViewModel/LeadSearchModel hoists never covered).
+    @Sendable private nonisolated static func liveFetch(_ ref: LeadRef) async throws -> ProfileInputs {
+        let repo = ProfileRepository(client: try SupabaseClient.make())
+        return try await repo.fetch(ref)
     }
 }

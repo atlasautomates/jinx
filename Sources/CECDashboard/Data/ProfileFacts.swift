@@ -28,6 +28,11 @@ enum ProfileFacts {
     }
 
     /// Personalization facts in display order (same blank-drop rule).
+    /// (`Source`/`Status`/`Tier` retired with the lead_enrichment table — 7.2.)
+    /// A corrupt casualized payload (jsonb string-scalar where an object
+    /// belongs) surfaces as its own fact — p7a5 exposes `casualized_shape`
+    /// expressly so corruption is visible rather than rendering as "never
+    /// casualized".
     static func personalization(_ e: LeadEnrichmentRow) -> [Fact] {
         present([
             ("Casual name", e.casualizedFirstName),
@@ -35,8 +40,8 @@ enum ProfileFacts {
             ("Casual city", e.casualizedCityName),
             ("Project ref", e.personalizationProject),
             ("Detail", e.personalizationDetail),
-            ("Source", e.enrichmentSource),
-            ("Status", e.enrichmentStatus),
+            ("Casualized data", e.casualizedCorrupt
+                ? "corrupt (\(e.casualizedShape ?? "?") — expected object)" : nil),
         ])
     }
 

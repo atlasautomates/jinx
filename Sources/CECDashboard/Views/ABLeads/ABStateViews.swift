@@ -85,9 +85,9 @@ struct ABErrorView: View {
 }
 
 /// Named degraded reads, shown beside the header stats. A bare `partial` flag was
-/// carried through the whole pipeline and rendered NOWHERE: a failed `replies` read
+/// carried through the whole pipeline and rendered NOWHERE: a failed replies read
 /// looked exactly like a book with no replies (same pink 0.0%), and a failed
-/// `send_queue` read drew a confident flat-zero outreach trend. This says which
+/// sent-events read drew a confident flat-zero outreach trend. This says which
 /// figures are understated, in the user's words.
 struct ABDegradedChip: View {
     let reads: [String]
@@ -97,7 +97,11 @@ struct ABDegradedChip: View {
         HStack(spacing: DesignTokens.space1) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 9))
-            Text(reads.count == 1 ? "\(reads[0]) unavailable" : "\(reads.count) reads failed")
+            // Names inline up to two reads — a glanceable dashboard shouldn't
+            // require a hover to learn WHICH figure is lying (reliability
+            // review); three or more fall back to a count + the tooltip.
+            Text(reads.count <= 2 ? "\(reads.joined(separator: " + ")) unavailable"
+                                  : "\(reads.count) reads failed")
                 .font(.adventor(DesignTokens.textXs, bold: true))
         }
         .foregroundStyle(DesignTokens.statusRedText)

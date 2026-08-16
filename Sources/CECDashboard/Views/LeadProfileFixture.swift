@@ -32,21 +32,20 @@ enum LeadProfileFixture {
                     + "posted this year is a lot of quoting for a three-person shop.",
                 personalizedOffer: "We reactivate your old quote list with a 5-email "
                     + "sequence, so the ones who went quiet get a reason to come back.",
-                enrichmentSource: "local-web-research",
-                enrichmentStatus: "partial",
-                leadTier: "2",
-                webResearchJson: .object([
+                research: .object([
                     "company_summary": .string("Family-owned solar and energy storage "
                         + "company specializing in RV, van, and off-grid installs."),
                     "confidence": .number(3),
                     "awards_or_news": .string("None found."),
                     "founded_year": .string("2018"),
-                ])),
+                ]),
+                casualizedShape: "object"),
             interactions: [],
             sentiment: nil,
             intent: nil,
             partial: false,
             interactionsFailed: false,
+            enrichmentCorrupt: false,
             interactionsTruncated: false)
     }
 

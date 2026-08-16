@@ -5,9 +5,9 @@ import Foundation
 /// One definition, four call sites. URLSession surfaces task cancellation as a
 /// wrapped `URLError.cancelled`, NOT as `CancellationError` — a fact this codebase
 /// had already learned once (`LeadProfileModel.load`) and then re-lost in newer
-/// code that guarded on `CancellationError` alone. Getting it wrong is not cosmetic
-/// here: a cancelled lane read returns `ok: false`, which disables the Lane filter
-/// and paints a red degraded chip because a window closed.
+/// code that guarded on `CancellationError` alone. Getting it wrong is not cosmetic:
+/// a cancelled supplementary walk returns `ok: false`, which paints a red degraded
+/// chip because a window closed.
 ///
 /// `Task.isCancelled` is checked too, since the erasure can happen either way.
 func isCancellation(_ error: Error) -> Bool {
@@ -17,9 +17,9 @@ func isCancellation(_ error: Error) -> Bool {
 }
 
 /// Thin, read-only PostgREST client over URLSession (no third-party dependency).
-/// Only issues GETs. The single sanctioned write in the app (staged-copy
-/// revisions) lives in `SupabaseWriteClient` behind its own Keychain item —
-/// never add write methods here.
+/// Only issues GETs. This app is READ-ONLY by design since 7.2 — it holds a
+/// read-scoped credential (the arcane_read_cec JWT, SELECT on the v_cec_* views
+/// only) — never add write methods here.
 struct SupabaseClient {
     enum ClientError: Error, LocalizedError {
         case missingKey
@@ -33,9 +33,14 @@ struct SupabaseClient {
                 // headless App Intent (Siri/Shortcuts/Aris) can read it without an
                 // "allow access" prompt. Otherwise open the app once and click
                 // "Always Allow" before using voice.
-                return "No Supabase API key in the Keychain. Store it with:\n"
+                return "Supabase credentials missing from the Keychain (both items are "
+                    + "required — the reader JWT rides the bearer, the anon key rides "
+                    + "the apikey header). Store them with:\n"
                     + "  security add-generic-password -s \(SupabaseConfig.keychainService)"
-                    + " -a \(SupabaseConfig.keychainAccount) -w <YOUR_KEY>"
+                    + " -a \(SupabaseConfig.keychainAccount) -w <READER_JWT>"
+                    + " -T /Applications/CECDashboard.app -U\n"
+                    + "  security add-generic-password -s \(SupabaseConfig.keychainService)"
+                    + " -a \(SupabaseConfig.anonKeychainAccount) -w <ANON_KEY>"
                     + " -T /Applications/CECDashboard.app -U"
             case .http(let status, let body):
                 // Raw PostgREST body (column/constraint detail) only in debug builds.
@@ -51,7 +56,10 @@ struct SupabaseClient {
     }
 
     let baseURL: URL
-    private let apiKey: String          // private: never surfaced/logged
+    /// The gateway key (`apikey` header) — anon/publishable. Grants nothing.
+    private let anonKey: String         // private: never surfaced/logged
+    /// The read-scoped credential (`Authorization: Bearer`) — the reader JWT.
+    private let bearerKey: String       // private: never surfaced/logged
     let session: URLSession
 
     /// Session with both a per-request (15s) and a hard whole-request (30s) ceiling,
@@ -64,16 +72,26 @@ struct SupabaseClient {
         return URLSession(configuration: config)
     }()
 
-    init(baseURL: URL, apiKey: String, session: URLSession = SupabaseClient.defaultSession) {
+    /// TWO keys, deliberately (6.1 intel, learned live at the 7.2 install
+    /// acceptance): the gateway validates `apikey` against KNOWN keys, so the
+    /// reader JWT there is a hard 401 before PostgREST ever runs — the anon
+    /// key must ride `apikey` while the scoped credential rides ONLY the
+    /// bearer, exactly like `.claude/shared/supabase_client.py`'s factory.
+    init(baseURL: URL, anonKey: String, bearerKey: String,
+         session: URLSession = SupabaseClient.defaultSession) {
         self.baseURL = baseURL
-        self.apiKey = apiKey
+        self.anonKey = anonKey
+        self.bearerKey = bearerKey
         self.session = session
     }
 
-    /// Build a client from config; throws `.missingKey` if the Keychain has no key.
+    /// Build a client from config; throws `.missingKey` when EITHER Keychain
+    /// item is absent (fail closed — an anon-only client would silently read
+    /// nothing through the views, a bearer-only one 401s at the gateway).
     static func make() throws -> SupabaseClient {
-        guard let key = SupabaseConfig.apiKey() else { throw ClientError.missingKey }
-        return SupabaseClient(baseURL: SupabaseConfig.restURL, apiKey: key)
+        guard let bearer = SupabaseConfig.apiKey(),
+              let anon = SupabaseConfig.anonKey() else { throw ClientError.missingKey }
+        return SupabaseClient(baseURL: SupabaseConfig.restURL, anonKey: anon, bearerKey: bearer)
     }
 
     /// Build a signed GET request for a table + query items. Shared by `get`/`count`.
@@ -87,8 +105,8 @@ struct SupabaseClient {
 
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
-        req.setValue(apiKey, forHTTPHeaderField: "apikey")
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(anonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(bearerKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 15
         return req

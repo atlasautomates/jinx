@@ -1,10 +1,11 @@
 import SwiftUI
 
-// LEVEL 3 (VARIANT C): three breakdowns — by source, industry, status — stacked
-// COMPACTLY in a narrow side column (Arm A's density) so the same data reads
-// concisely and leaves the recent-leads list room above the fold. Horizontal
-// bars, width proportional to the panel max. Source/industry use teal; status
-// colors each bar by its role (teal/pink/neutral/warn — decision-log #5).
+// LEVEL 3 (VARIANT C): the stage funnel + three breakdowns — source, region,
+// industry — stacked COMPACTLY in a narrow side column (Arm A's density) so
+// the same data reads concisely and leaves the recent-leads list room above
+// the fold. Horizontal bars, width proportional to the panel max. Partition
+// panels use teal; funnel rows color by role (teal/pink/neutral —
+// decision-log #5; the warn role retired with the 7.2 stage vocabulary).
 
 struct ABBreakdownPanel: View {
     let title: String
@@ -35,6 +36,7 @@ struct ABBreakdownPanel: View {
             VStack(spacing: DesignTokens.space1) {
                 ForEach(items) { item in
                     ABBreakdownRow(label: item.label, count: item.count,
+                                   share: item.share,
                                    fraction: CGFloat(item.count) / CGFloat(maxCount),
                                    color: colorFor?(item.label) ?? DesignTokens.accent,
                                    forcedHover: forcedHoverLabel == item.label)
@@ -50,6 +52,9 @@ struct ABBreakdownPanel: View {
 private struct ABBreakdownRow: View {
     let label: String
     let count: Int
+    /// Retention share (percent of the funnel denominator). Non-nil ONLY for
+    /// stage-funnel rows — the cue that these buckets overlap rather than sum.
+    var share: Double? = nil
     let fraction: CGFloat
     let color: Color
     var forcedHover: Bool = false
@@ -65,6 +70,11 @@ private struct ABBreakdownRow: View {
                     .foregroundStyle(active ? DesignTokens.textPrimary : DesignTokens.textSecondary)
                     .lineLimit(1)
                 Spacer()
+                if let share {
+                    Text("\(Int(share.rounded()))% ·")
+                        .font(.abMono(DesignTokens.textXs))
+                        .foregroundStyle(DesignTokens.textGhost)
+                }
                 Text(count, format: .number)
                     .font(.abMono(DesignTokens.textXs, weight: .semibold))
                     .foregroundStyle(active ? color : DesignTokens.textSecondary)
@@ -104,7 +114,6 @@ struct ABBreakdownRowGroup: View {
         switch ABStatusRole(label) {
         case .reward:  return DesignTokens.accentPink
         case .active:  return DesignTokens.accent
-        case .warn:    return DesignTokens.statusRedText
         case .neutral: return DesignTokens.textMuted
         }
     }
@@ -119,7 +128,12 @@ struct ABBreakdownRowGroup: View {
         // region" panel was originally inserted second, which pushed two panels
         // named in the tab's brief below the fold of a column with no scrollbar.
         VStack(alignment: .leading, spacing: DesignTokens.space2) {
-            ABBreakdownPanel(title: "By status", items: data.byStatus,
+            // "Stage funnel", deliberately OUT of the "By …" partition grammar:
+            // its buckets overlap (Campaigned ⊆ Personalized-ish ⊆ Scraped), and
+            // wearing a partition title next to three true partitions made it
+            // read as a broken breakdown (design review, 7.2). The per-row
+            // retention share is the second cue.
+            ABBreakdownPanel(title: "Stage funnel", items: data.byStatus,
                              colorFor: statusColor,
                              forcedHoverLabel: forcedHoverStatusLabel,
                              scopeNote: data.breakdownScopeNote)

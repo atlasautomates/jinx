@@ -11,9 +11,9 @@ import Foundation
 struct LeadFilter: Equatable, Sendable {
     /// Which personalization lane a lead went through.
     enum Lane: String, CaseIterable, Sendable {
-        case deep       // ce-deepprep cohort (lead_enrichment.deep_cohort_run_id)
-        case standard   // has a personalized opener, but no deep-lane run
-        case none       // no opener written yet
+        case deep       // deepening elected (lead_status.deepening ≠ 'none')
+        case standard   // campaign-ready copy exists, but no deepening election
+        case none       // no send-ready copy yet
 
         var label: String {
             switch self {
@@ -21,8 +21,8 @@ struct LeadFilter: Equatable, Sendable {
             case .standard: return "Standard personalization"
             // NOT "Not personalized": deep-lane leads keep their lane even when
             // their copy hasn't been written, so this bucket is standard-lane leads
-            // with no opener — it does not list every lead lacking copy, and the
-            // label must not promise that it does.
+            // with no send-ready copy — it does not list every lead lacking copy,
+            // and the label must not promise that it does.
             case .none:     return "No opener yet"
             }
         }
@@ -44,13 +44,6 @@ struct LeadFilter: Equatable, Sendable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
-    /// The same lens without its lane dimension — used when the lane reads failed,
-    /// so the derivation can suppress a dimension it cannot compute WITHOUT the
-    /// user's selection being rewritten (the bar keeps editing `filter`).
-    func droppingLane() -> LeadFilter {
-        LeadFilter(lane: nil, region: region, source: source, industry: industry)
-    }
-
     /// Does one lead's derived facets pass every active dimension?
     /// Facet derivation lives in `LeadFacets` so the filter and the facet menus
     /// can never disagree about what a lead's region/source/industry IS.
@@ -64,9 +57,10 @@ struct LeadFilter: Equatable, Sendable {
 }
 
 /// One lead reduced to the four filterable dimensions, plus the parsed timestamp
-/// the trends bucket on. Derived ONCE per lead per snapshot (in
-/// `LeadSnapshot.facets`) and reused by the filter test, the facet menus, the
-/// breakdown panels AND the rendered row — one derivation, no drift.
+/// the trends bucket on and the derived pipeline stage the row displays. Derived
+/// ONCE per lead per snapshot (in `LeadSnapshot`) and reused by the filter test,
+/// the facet menus, the breakdown panels AND the rendered row — one derivation,
+/// no drift.
 ///
 /// The single-derivation rule is not tidiness. Two things depended on it: the row
 /// used to label a null source "—" while the panel and the menu called the same
@@ -80,6 +74,12 @@ struct LeadFacets: Equatable, Sendable {
     let industry: String
     /// Display label for the row's location column (not a filter dimension).
     let location: String
+    /// The furthest pipeline stage this lead provably reached — display
+    /// vocabulary shared with the funnel rollup ("Scraped" / "Researched" /
+    /// "Personalized" / "Campaigned"), promoted to "Replied" when an inbound
+    /// email is on record (the reward outcome must stay visible in the list —
+    /// design review, 7.2). See `stage(lead:emailed:replied:)`.
+    let stage: String
     /// `created_at`, parsed once. `ISO8601DateFormatter` costs ~60 µs a call and
     /// dominated the old per-derive cost.
     let createdAt: Date?
@@ -89,20 +89,53 @@ struct LeadFacets: Equatable, Sendable {
     /// labelled with a different word than the option that selected them.
     static let unknown = "Unknown"
 
-    init(lead: LeadRow, deepLane: Bool, personalized: Bool) {
-        // Deep is a PROVENANCE, not a state: a deep-cohort lead stays in the deep
-        // lane even before its copy is written (9 of the 16 live deep leads have no
-        // opener yet). The third bucket is therefore named for what it actually
-        // tests — no opener, standard lane — rather than "not personalized", which
-        // would read as a promise to list every lead lacking copy.
-        self.lane = deepLane ? .deep : (personalized ? .standard : LeadFilter.Lane.none)
+    /// `emailed` = this lead appears in the sent-event log (7.2: the permanent
+    /// `v_cec_sent_events` record is the emailed truth — NOT the `outreach` axis,
+    /// which diverges from it on 41 live leads whose only send bounced; diagnosed
+    /// finding on the plan). `replied` = an inbound email is on record.
+    init(lead: LeadRow, emailed: Bool, replied: Bool = false) {
+        // Deep is a PROVENANCE, not a state: the deepening ELECTION keeps a lead
+        // in the deep lane even before its copy is written. A nil axis (no
+        // lead_status row — `statusRowMissing`) classifies as not-elected: that
+        // is a judgment this derivation layer makes for display, not a value we
+        // pretend the database wrote.
+        let deep = lead.deepening.map { $0 != "none" } ?? false
+        let personalized = lead.personalized == true
+        self.lane = deep ? .deep : (personalized ? .standard : LeadFilter.Lane.none)
         self.region = RegionKey.region(city: lead.city, state: lead.state,
                                        location: lead.location, country: lead.country)
         self.source = lead.leadSource?.nilIfEmpty ?? Self.unknown
         self.industry = lead.industry?.nilIfEmpty ?? Self.unknown
         self.location = ABLeadsData.locationLabel(city: lead.city, state: lead.state,
                                                   location: lead.location)
+        self.stage = Self.stage(lead: lead, emailed: emailed, replied: replied)
         self.createdAt = DateParse.iso(lead.createdAt)
+    }
+
+    /// Furthest-stage derivation (one spelling, shared by the row label and the
+    /// funnel inputs): Replied (an inbound email exists — the reward outcome,
+    /// past Campaigned) > Campaigned (a send is on record) > Personalized
+    /// (campaign-ready copy — the view's guarded copy of the one method) >
+    /// Researched (a dossier exists) > Scraped (in the book at all).
+    static func stage(lead: LeadRow, emailed: Bool, replied: Bool = false) -> String {
+        if replied { return "Replied" }
+        if emailed { return "Campaigned" }
+        if lead.personalized == true { return "Personalized" }
+        if lead.hasResearch == true { return "Researched" }
+        return "Scraped"
+    }
+
+    /// The `outreach`-axis fallback for "was this lead emailed" — used ONLY when
+    /// the sent-events read degraded (see `LeadSnapshot`): an empty event set is
+    /// then a READ FAILURE, not a fact about the book, and deriving every row's
+    /// stage from it would relabel every campaigned lead "Personalized" — the
+    /// exact misclassification class the old lane-degradation guard existed to
+    /// prevent (swift-semantics review, 7.2).
+    static func emailedPerAxis(_ lead: LeadRow) -> Bool {
+        switch lead.outreach {
+        case "in_sequence", "sequence_done", "replied": return true
+        default: return false
+        }
     }
 }
 
@@ -111,29 +144,49 @@ struct LeadFacets: Equatable, Sendable {
 /// tallies over these values.
 struct LeadSnapshot: Sendable {
     let inputs: DashboardInputs
+    /// DISTINCT leads with at least one send on record — derived once from the
+    /// sent-event log, consumed by the facet derivation, the emailed KPI and the
+    /// funnel rollup, so the three can never disagree.
+    let emailedLeadIDs: Set<String>
+    /// True when the sent-events read FAILED: `emailedLeadIDs` is then empty (or
+    /// a floor) because of the failure, not the book, and every emailed test in
+    /// this snapshot falls back to the `outreach` axis instead — approximate,
+    /// but never "everyone is unemailed".
+    let sentEventsDegraded: Bool
     /// Parallel to `inputs.leads` — index i describes lead i. Built together in
     /// `init`, so the two can't drift apart.
     let facets: [LeadFacets]
+    /// Leads whose `status_row_missing` flag is set — a broken write-path
+    /// invariant p7a5 surfaces expressly so a NULL axis can't masquerade as a
+    /// state; the tab's note area discloses the count.
+    let statusRowsMissing: Int
 
     init(_ inputs: DashboardInputs) {
         self.inputs = inputs
+        let emailed = Set(inputs.messagedSends.map(\.leadID))
+        self.emailedLeadIDs = emailed
+        let degraded = inputs.degradedReads.contains("outreach history")
+        self.sentEventsDegraded = degraded
         // Built through the same per-row derivation the search path uses, so a hit
         // and a list row can never be classified differently.
         self.facets = inputs.leads.map { row in
             LeadFacets(lead: row,
-                       deepLane: inputs.deepLaneLeadIDs.contains(row.id),
-                       personalized: inputs.personalizedLeadIDs.contains(row.id))
+                       emailed: degraded ? LeadFacets.emailedPerAxis(row)
+                                         : emailed.contains(row.id),
+                       replied: inputs.repliedLeadIDs.contains(row.id))
         }
+        self.statusRowsMissing = inputs.leads.count(where: { $0.statusRowMissing == true })
     }
 
     /// Facets for ANY row, including one the snapshot doesn't contain (a search hit
-    /// from beyond the fetched book). The id sets are the whole classification, so
-    /// this is exact for rows in the book and correctly reports "no opener" only
-    /// when the enrichment reads genuinely say so.
+    /// from beyond the fetched book). Lane/stage inputs ride the row itself
+    /// (`v_cec_leads` axes) plus the sent-event and replied sets, so this is exact
+    /// for any row the search select returns.
     func facets(for row: LeadRow) -> LeadFacets {
         LeadFacets(lead: row,
-                   deepLane: inputs.deepLaneLeadIDs.contains(row.id),
-                   personalized: inputs.personalizedLeadIDs.contains(row.id))
+                   emailed: sentEventsDegraded ? LeadFacets.emailedPerAxis(row)
+                                               : emailedLeadIDs.contains(row.id),
+                   replied: inputs.repliedLeadIDs.contains(row.id))
     }
 }
 

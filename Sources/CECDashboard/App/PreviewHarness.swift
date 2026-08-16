@@ -73,13 +73,7 @@ enum PreviewRegistry {
         "profile":      { AnyView(LeadProfileFixture.view()) },
         "profile-copy": { AnyView(LeadProfileFixture.view(
             demo: LeadProfileFixture.copyDemo)) },
-        // Campaigns drill-down, one still per level (fixture, no network).
-        "campaigns":       { AnyView(ABCampaignsFixture.list()) },
-        "campaign-leads":  { AnyView(ABCampaignsFixture.leads()) },
-        "campaign-thread": { AnyView(ABCampaignsFixture.thread()) },
-        // The revision editor OPEN — proves the TextEditor gate to the
-        // placeholder detector (an ungated NSTextView would paint yellow).
-        "campaign-thread-editing": { AnyView(ABCampaignsFixture.threadEditing()) },
+        // (The campaigns/pipeline stills left with their tabs — 7.2 deprecation.)
     ]
 }
 

@@ -19,6 +19,12 @@ final class DashboardViewModel {
     /// The active lens. Set through `apply(_:)` so the derived view can never lag
     /// behind the filter the bar is drawing.
     private(set) var filter: LeadFilter = .all
+    /// When a load was last ATTEMPTED (success or not). The wake/activation
+    /// throttle floors on this, not on `loadedAt` — success-only stamping made
+    /// the throttle vacuous exactly while loads were failing (no credential,
+    /// expired JWT), so every Cmd-Tab fired a fresh Keychain read + full walk
+    /// (contention lens).
+    private(set) var lastAttemptAt: Date? = nil
     /// When the data currently on screen was fetched.
     ///
     /// Owned HERE, and written only on the success path, because the header stamp
@@ -81,6 +87,7 @@ final class DashboardViewModel {
         // check and the set.
         guard !isRefreshing else { return }
         isRefreshing = true
+        lastAttemptAt = Date()
         defer { isRefreshing = false }
 
         if state.value == nil { state = .loading }
@@ -119,6 +126,42 @@ final class DashboardViewModel {
     @Sendable nonisolated static func liveFetch() async throws -> DashboardInputs {
         let client = try SupabaseClient.make()
         return try await LeadsRepository(client: client).fetch()
+    }
+
+    /// Event-entry-point refresh: a STORED, cancel-and-replace task, so a
+    /// window closed mid-refresh doesn't strand an unowned task holding a
+    /// URLSession request to its 30 s resource ceiling. Full parity with
+    /// LeadSearchModel.inFlight (delta round 2): the nonisolated TaskBox lets
+    /// `deinit` cancel the in-flight request when the window closes, and the
+    /// identity-guarded nil-out stops a finishing task from clearing its
+    /// SUCCESSOR's handle (which would make the successor uncancellable).
+    private var refreshTask: Task<Void, Never>? {
+        didSet { liveRefresh.set(refreshTask) }
+    }
+    private var refreshGeneration = 0
+    func requestLoad() {
+        refreshTask?.cancel()
+        refreshGeneration += 1
+        let gen = refreshGeneration
+        refreshTask = Task { [weak self] in
+            await self?.load()
+            // Identity-guarded: only the CURRENT generation may clear the
+            // handle — a superseded task nulling it made its successor
+            // uncancellable.
+            if let self, self.refreshGeneration == gen { self.refreshTask = nil }
+        }
+    }
+
+    private let liveRefresh = TaskBox()
+    deinit { liveRefresh.cancel() }
+
+    /// Nonisolated holder so `deinit` (nonisolated) can cancel without touching
+    /// main-actor state — the LeadSearchModel pattern.
+    private final class TaskBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: Task<Void, Never>?
+        func set(_ t: Task<Void, Never>?) { lock.lock(); task = t; lock.unlock() }
+        func cancel() { lock.lock(); let t = task; task = nil; lock.unlock(); t?.cancel() }
     }
 
     /// Apply a new lens and re-derive every figure from the snapshot in memory.

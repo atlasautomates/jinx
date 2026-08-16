@@ -1,53 +1,64 @@
 import SwiftUI
 
+// 7.2 remap: the app is the LEADS SURFACE only. The Pipeline tab (unused) and
+// the Campaigns tab (write access; may return as its own app) are DEPRECATED
+// per Adrian's ruling 2026-08-16 — their views, view models and repositories
+// are deleted, not hidden: under the reader credential their table reads have
+// no data source, so a hidden tab would be a broken tab waiting to be found.
 struct RootView: View {
     @State private var model = DashboardViewModel()
     @State private var searchModel = LeadSearchModel()
-    @State private var campaignModel = CampaignDashboardViewModel()
-    @State private var pipelineModel = PipelineDashboardViewModel()
-    @State private var inspectorModel = LeadInspectorModel()
-    @State private var campaignDrill = CampaignDrillModel()
-    @State private var backlogModel = BacklogViewModel()
-    // One profile seam for every tab: rows set `presenter.active`, this view
-    // presents the sheet (P3).
+    // One profile seam for every entry point (rows, search hits, pins): callers
+    // set `presenter.active`, this view presents the sheet (P3).
     @State private var profilePresenter = ProfilePresenter()
     // Pinned leads (P5): local JSON store, loaded once, injected app-wide.
-    @State private var pinsModel = PinsModel()
+    // In `--fixture` mode the store points at a per-run scratch dir: the real
+    // pin file would render REAL leads above the synthetic book, and a chip
+    // tap opens the live profile sheet — a Keychain + network path one click
+    // away in the mode whose whole claim is "no Keychain, no network"
+    // (contention lens; same discipline as LeadProfileFixture's previewPins).
+    @State private var pinsModel = LeadsFixtureSource.isRequested
+        ? PinsModel(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("CECDashboard-fixture-pins-\(UUID().uuidString)",
+                                    isDirectory: true))
+        : PinsModel()
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
     @State private var titlebarHover = TitlebarHover()
 
     var body: some View {
-        TabView {
-            leadsTab
-                .tabItem { Label("Leads", systemImage: "person.3.fill") }
-            campaignsTab
-                .tabItem { Label("Campaigns", systemImage: "paperplane.fill") }
-            pipelineTab
-                .tabItem { Label("Pipeline", systemImage: "arrow.triangle.branch") }
-        }
-        .preferredColorScheme(.dark)
-        .frame(minWidth: 820, minHeight: 600)
-        .environment(profilePresenter)
-        .environment(pinsModel)
-        .sheet(item: Bindable(profilePresenter).active) { ref in
-            // Explicit injection: sheet content is a separate presentation
-            // host — never rely on cross-boundary environment inheritance
-            // (platform review; the pin button consumes both).
-            LeadProfileView(ref: ref)
-                .environment(profilePresenter)
-                .environment(pinsModel)
-        }
-        .background(WindowAccessor { titlebarHover.attach(to: $0) })
-        .task { await initialLeadsLoad() }       // initial Leads load
-        // Offline dev mode drives the Leads tab only: every other loop below would
-        // reach for the Keychain and the network, which is the whole point of not
-        // running them.
-        .task { if !LeadsFixtureSource.isRequested { await campaignModel.load() } }
-        .task { if !LeadsFixtureSource.isRequested { await backlogModel.load() } }
-        .task { if !LeadsFixtureSource.isRequested { await pipelinePolling() } }
-        .task { if !LeadsFixtureSource.isRequested { await periodicRefresh() } }
-        .task { await refreshOnWake() }
+        leadsSurface
+            .preferredColorScheme(.dark)
+            .frame(minWidth: 820, minHeight: 600)
+            .environment(profilePresenter)
+            .environment(pinsModel)
+            .sheet(item: Bindable(profilePresenter).active) { ref in
+                // Explicit injection: sheet content is a separate presentation
+                // host — never rely on cross-boundary environment inheritance
+                // (platform review; the pin button consumes both).
+                LeadProfileView(ref: ref)
+                    .environment(profilePresenter)
+                    .environment(pinsModel)
+            }
+            .background(WindowAccessor { titlebarHover.attach(to: $0) })
+            .task { await initialLeadsLoad() }       // initial load
+            // Offline dev mode never reaches for the Keychain or the network —
+            // which is the whole point of not running the refresh loops.
+            .task { if !LeadsFixtureSource.isRequested { await periodicRefresh() } }
+            // Two sibling .task children instead of one task group: same
+            // concurrency, view-lifetime cancellation for free, and no capture
+            // pattern the Swift 6 region-isolation checker refuses to check
+            // (swift-semantics review, 7.2).
+            .task { await refreshOn(NSWorkspace.shared.notificationCenter,
+                                    NSWorkspace.didWakeNotification) }
+            .task { await refreshOn(NotificationCenter.default,
+                                    NSApplication.didBecomeActiveNotification) }
+            // Re-push the search scope whenever a load LANDS — the initial-load
+            // call site can be deduped by a concurrent wake/activation refresh
+            // (load() returns void either way), and a scope pushed against an
+            // empty snapshot would leave the facet resolver nil until the next
+            // filter change.
+            .onChange(of: model.loadedAt) { syncSearchScope() }
     }
 
     /// Normal launch → live fetch. `--fixture` (DEBUG-only) → synthetic book, no
@@ -73,80 +84,50 @@ struct RootView: View {
     /// while the Mac is asleep — a lid opened after a weekend resumes mid-interval
     /// and keeps painting pre-sleep numbers. (The "as of HH:mm" stamp in the header
     /// is the belt to this pair of braces.)
-    private func refreshOnWake() async {
+    private func refreshOn(_ center: NotificationCenter, _ name: Notification.Name) async {
         guard !LeadsFixtureSource.isRequested else { return }
-        let center = NotificationCenter.default
-        let workspace = NSWorkspace.shared.notificationCenter
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor in
-                for await _ in workspace.notifications(named: NSWorkspace.didWakeNotification) {
-                    await reloadLeads()
-                }
-            }
-            group.addTask { @MainActor in
-                for await _ in center.notifications(named: NSApplication.didBecomeActiveNotification) {
-                    await reloadLeads()
-                }
-            }
+        for await _ in center.notifications(named: name) {
+            await reloadLeads()
         }
     }
 
     /// Wake/activation refresh, throttled.
     ///
     /// `didBecomeActive` fires on every Cmd-Tab back into the window, and each
-    /// refresh is a full book walk (~14 PostgREST round trips today, ~47 at 10x).
-    /// The in-flight guard prevents overlap, not repetition — so this adds the
-    /// missing floor. The manual Refresh button deliberately bypasses it.
+    /// refresh is a full book walk (multiple PostgREST round trips). The in-flight
+    /// guard prevents overlap, not repetition — so this adds the missing floor.
+    /// The manual Refresh button deliberately bypasses it.
     @MainActor
     private func reloadLeads(minInterval: TimeInterval = 60) async {
-        if let loadedAt = model.loadedAt,
-           Date().timeIntervalSince(loadedAt) < minInterval { return }
+        // Floor on the last ATTEMPT, not the last success: with success-only
+        // stamping the floor was vacuous precisely while loads were failing,
+        // and every Cmd-Tab fired a fresh Keychain read + full book walk.
+        if let stamp = model.lastAttemptAt ?? model.loadedAt,
+           Date().timeIntervalSince(stamp) < minInterval { return }
         await model.load()
     }
 
-    /// Re-fetch Leads + Campaigns + backlog every 10 minutes while the app is open.
-    /// Each tab's layout is deterministic, so only the data changes — the live Leads
-    /// tab re-maps `model`'s fetch into `ABLeadsData` on each pass. Manual Refresh
-    /// stays per-tab. (Pipeline is deliberately NOT in this fan-out —
-    /// `pipelinePolling` owns its faster cadence.)
+    /// Re-fetch the book every 10 minutes while the app is open. The layout is
+    /// deterministic, so only the data changes — each pass re-maps the fetch
+    /// into `ABLeadsData`. Manual Refresh stays on the header.
     private func periodicRefresh() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 600 * 1_000_000_000)   // 10 minutes
             if Task.isCancelled { break }
-            // Refresh concurrently — independent tables, each guards its own
-            // in-flight refresh, so there's no ordering dependency.
-            async let leads: Void = model.load()
-            async let campaigns: Void = campaignModel.load()
-            async let backlog: Void = backlogModel.load()
-            async let drilled: Void = campaignDrill.refreshLevel()
-            _ = await (leads, campaigns, drilled, backlog)
+            await model.load()
         }
     }
 
-    /// Pipeline poll loop (P5-3): 8s while a run is live so stages visibly advance
-    /// (the acceptance is literally watching an opener appear after personalize),
-    /// 10 min when idle. Structured `.task` — cancelled with the window, so the
-    /// fast cadence can never outlive the UI it exists for.
-    private func pipelinePolling() async {
-        await pipelineModel.load()   // initial load
-        while !Task.isCancelled {
-            let interval: UInt64 = pipelineModel.hasRunningRun ? 8 : 600
-            try? await Task.sleep(nanoseconds: interval * 1_000_000_000)
-            if Task.isCancelled { break }
-            await pipelineModel.load()
-        }
-    }
+    // MARK: - Leads surface (re-skinned ABLeads, live data)
 
-    // MARK: - Leads tab (re-skinned ABLeads, live data)
-
-    // The Leads tab renders `ABLeadsView` from the LIVE pipeline: DashboardViewModel
-    // fetches Supabase (LeadsRepository → DashboardInputs) and maps it into
-    // `ABLeadsData`. The pinned strip rides on top; rows/pins open the shared lead
-    // profile. Loadable states render distinctly (loading / error / stale) — never a
-    // blank black screen. The `--screenshot` harness renders the FROZEN fixture
-    // through this same view code (no network). (decision-log #16)
+    // Renders `ABLeadsView` from the LIVE pipeline: DashboardViewModel fetches
+    // Supabase (LeadsRepository → DashboardInputs, all v_cec_* views) and maps it
+    // into `ABLeadsData`. The pinned strip rides on top; rows/pins open the shared
+    // lead profile. Loadable states render distinctly (loading / error / stale) —
+    // never a blank black screen. The `--screenshot` harness renders the FROZEN
+    // fixture through this same view code (no network). (decision-log #16)
     @ViewBuilder
-    private var leadsTab: some View {
+    private var leadsSurface: some View {
         VStack(spacing: 0) {
             PinnedStrip()
             leadsContent
@@ -209,7 +190,7 @@ struct RootView: View {
             // In fixture mode a refresh would perform the REAL Keychain + network
             // load, replacing (or, on failure, re-labelling) synthetic rows as live
             // ones. The view treats nil as "no refresh control".
-            onRefresh: fixture ? nil : { Task { await model.load() } },
+            onRefresh: fixture ? nil : { model.requestLoad() },
             isRefreshing: model.isRefreshing,
             staleMessage: staleMessage,
             fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
@@ -248,97 +229,7 @@ struct RootView: View {
             searchModel.fixtureRows = model.snapshotLeads
             syncSearchScope()
         } else {
-            Task { await model.load() }
-        }
-    }
-
-    // MARK: - Campaigns tab (drill-down: campaigns → leads → correspondence)
-
-    @ViewBuilder
-    private var campaignsTab: some View {
-        if LeadsFixtureSource.isRequested {
-            // Never loaded offline; an indefinite spinner would be
-            // indistinguishable from a hung fetch.
-            ABErrorView(message: "Offline fixture mode — this tab needs live credentials.",
-                        onRetry: nil)
-        } else {
-            campaignsLive
-        }
-    }
-
-    @ViewBuilder
-    private var campaignsLive: some View {
-        // loaded and stale share ONE structural arm (same S05 lesson as the
-        // Leads tab): a transient refresh failure must not reset the drill.
-        if let inputs = campaignModel.state.value {
-            ABCampaignsView(
-                inputs: inputs,
-                drill: campaignDrill,
-                // Refresh reaches the CURRENT drill level too — a header that
-                // refreshes over rows that don't is two ages on one screen
-                // (state-machine review F2).
-                onRefresh: { Task {
-                    async let level1: Void = campaignModel.load()
-                    async let drilled: Void = campaignDrill.refreshLevel()
-                    _ = await (level1, drilled)
-                } },
-                isRefreshing: campaignModel.isRefreshing,
-                staleMessage: campaignModel.state.staleMessage
-            )
-        } else if case .failed(let message) = campaignModel.state {
-            ABErrorView(message: message,
-                        onRetry: { Task { await campaignModel.load() } },
-                        noun: "campaigns")
-        } else {
-            ABLoadingView(noun: "campaigns")
-        }
-    }
-
-    // MARK: - Pipeline tab (fixed deterministic layout + lead inspector; READ-ONLY)
-
-    // NOTE (platform review): WindowGroup allows Cmd-N; each extra window runs
-    // its own poll loops. Accepted — read-only anon GETs, and the loops die
-    // with their window. Revisit as a `Window` scene if it ever matters.
-    @ViewBuilder
-    private var pipelineTab: some View {
-        if LeadsFixtureSource.isRequested {
-            ABErrorView(message: "Offline fixture mode — this tab needs live credentials.",
-                        onRetry: nil)
-        } else {
-            pipelineLive
-        }
-    }
-
-    @ViewBuilder
-    private var pipelineLive: some View {
-        VSplitView {
-            pipelineDashboard
-                .frame(minHeight: 220)
-            BacklogBoardView(model: backlogModel)
-                .frame(minHeight: 96, idealHeight: 150)   // P6 backlog board
-            LeadInspectorView(model: inspectorModel)
-                .frame(minHeight: 150)
-        }
-    }
-
-    @ViewBuilder
-    private var pipelineDashboard: some View {
-        switch pipelineModel.state {
-        case .idle, .loading:
-            LoadingView()
-        case .loaded(let dashboard):
-            DashboardShell(
-                dashboard: dashboard, title: "Pipeline", isRefreshing: pipelineModel.isRefreshing,
-                onRefresh: { Task { await pipelineModel.load() } }
-            )
-        case .stale(let dashboard, _, let message):
-            DashboardShell(
-                dashboard: dashboard, title: "Pipeline", isRefreshing: pipelineModel.isRefreshing,
-                staleMessage: message,
-                onRefresh: { Task { await pipelineModel.load() } }
-            )
-        case .failed(let message):
-            ErrorView(message: message, onRetry: { Task { await pipelineModel.load() } })
+            model.requestLoad()
         }
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Minimal lead identity shared by every profile entry point (Leads list,
-/// campaign rosters, Pipeline inspector) — and the pin identity later.
+/// Minimal lead identity shared by every profile entry point (Leads list, search
+/// hits, pinned strip) — and the pin identity later.
 struct LeadRef: Identifiable, Codable, Equatable, Hashable {
     let id: String
     let companyName: String?
@@ -10,7 +10,9 @@ struct LeadRef: Identifiable, Codable, Equatable, Hashable {
 
 /// The profile's rows (same tolerance-first philosophy as the other Row types:
 /// only the PK is required; every display field renders a gap when absent).
-/// Mirrors `.claude/skills/lead-profile/scripts/lookup_profile.py`'s reads.
+/// Both decode from ONE `v_cec_lead_profile` read (7.2 remap) — the view is a
+/// LEFT JOIN of the lead and its generated row, so the lead half and the
+/// generated half are two decodes of the same response.
 
 struct LeadDetailRow: Codable {
     let id: String
@@ -47,6 +49,10 @@ struct LeadDetailRow: Codable {
     }
 }
 
+/// The GENERATED half of the profile view (`lead_generated` via the LEFT JOIN):
+/// casualized values, personalization, opener/offer, research. The view
+/// flattens the jsonb columns (with `jsonb_typeof` guards, so corrupt shapes
+/// read as absent) — the app never re-parses them.
 struct LeadEnrichmentRow: Codable {
     let casualizedFirstName: String?
     let casualizedCompanyName: String?
@@ -55,10 +61,11 @@ struct LeadEnrichmentRow: Codable {
     let personalizationDetail: String?
     let personalizedOpener: String?
     let personalizedOffer: String?
-    let enrichmentSource: String?
-    let enrichmentStatus: String?
-    let leadTier: String?
-    let webResearchJson: JSONValue?
+    let research: JSONValue?
+    /// `jsonb_typeof(casualized)` from the view — p7a5 exposes it so a
+    /// corrupted casualized payload (a string scalar where an object belongs)
+    /// is VISIBLE rather than rendering identically to "never casualized".
+    let casualizedShape: String?
 
     enum CodingKeys: String, CodingKey {
         case casualizedFirstName = "casualized_first_name"
@@ -68,19 +75,43 @@ struct LeadEnrichmentRow: Codable {
         case personalizationDetail = "personalization_detail"
         case personalizedOpener = "personalized_opener"
         case personalizedOffer = "personalized_offer"
-        case enrichmentSource = "enrichment_source"
-        case enrichmentStatus = "enrichment_status"
-        case leadTier = "lead_tier"
-        case webResearchJson = "web_research_json"
+        case research
+        case casualizedShape = "casualized_shape"
+    }
+
+    /// True when every generated field is absent. The LEFT JOIN returns a row
+    /// for EVERY lead — a lead with no `lead_generated` row decodes to all-nil
+    /// here, and presenting that as "an enrichment exists" would render an empty
+    /// Personalization card. The repository synthesizes nil instead (7.2 item 12).
+    var isEmpty: Bool {
+        !hasPersonalizationContent && research == nil && !casualizedCorrupt
+    }
+
+    /// True when the PERSONALIZATION CARD has something to show: any casualized
+    /// value, personalization fact, opener, or offer that survives a whitespace
+    /// trim. A research-only lead (the pipeline's most common intermediate
+    /// state) has an enrichment row but NO card content — rendering the card
+    /// for it produced an empty fact grid (QA finding, 7.2). Blank-string
+    /// openers count as absent, matching the view's own btrim predicate.
+    var hasPersonalizationContent: Bool {
+        [casualizedFirstName, casualizedCompanyName, casualizedCityName,
+         personalizationProject, personalizationDetail,
+         personalizedOpener, personalizedOffer]
+            .contains { $0?.nilIfEmpty != nil }
+    }
+
+    /// The casualized jsonb exists but is not an object — corrupt, not absent.
+    var casualizedCorrupt: Bool {
+        guard let shape = casualizedShape else { return false }
+        return shape != "object"
     }
 }
 
-/// One `lead_interactions` row. NOTE the column is `interaction_type`
+/// One `v_cec_lead_interactions` row. NOTE the column is `interaction_type`
 /// (verified live), not `type`. `metadata` is free-form jsonb — sentiment and
 /// intent live inside it on inbound rows.
 struct LeadInteractionRow: Codable {
-    /// Primary key — selected by the correspondence read for stable timeline
-    /// identity; the profile read omits it (older call site), so optional.
+    /// Primary key — stable timeline identity + the replied-set keyset cursor.
     let id: String?
     let interactionType: String?
     let direction: String?
@@ -124,8 +155,9 @@ struct LeadInteractionRow: Codable {
     }
 }
 
-/// Everything one profile render needs. `lead` is essential; enrichment and
-/// interactions are fail-open (missing → sections render a gap + `partial`).
+/// Everything one profile render needs. `lead` is essential; enrichment rides
+/// the same essential read (nil = no generated row yet) and interactions are
+/// fail-open (missing → the timeline renders a gap + `partial`).
 struct ProfileInputs {
     let lead: LeadDetailRow
     let enrichment: LeadEnrichmentRow?
@@ -137,5 +169,9 @@ struct ProfileInputs {
     /// The interactions READ failed (distinct from a genuinely empty
     /// conversation) — the view words the empty state honestly.
     let interactionsFailed: Bool
+    /// The generated half FAILED TO DECODE (distinct from "never enriched") —
+    /// its own flag so the partial banner can name BOTH causes when both
+    /// fail, instead of blaming whichever one it checked first.
+    let enrichmentCorrupt: Bool
     let interactionsTruncated: Bool
 }

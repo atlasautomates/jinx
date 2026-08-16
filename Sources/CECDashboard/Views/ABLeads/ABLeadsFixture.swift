@@ -7,7 +7,16 @@ import Foundation
 struct ABLeadsData: Sendable {
     struct Totals { let scraped: Int; let emailed: Int; let replies: Int }
     struct Series { let weeks: [String]; let values: [Int] }
-    struct Breakdown: Identifiable { let label: String; let count: Int; var id: String { label } }
+    /// One breakdown row. `share` (percent of the funnel's denominator) is set
+    /// ONLY by the stage funnel — its buckets OVERLAP, so without a stated
+    /// retention figure the panel reads as a partition whose numbers don't sum
+    /// (design review, 7.2). Partition panels leave it nil.
+    struct Breakdown: Identifiable {
+        let label: String
+        let count: Int
+        var share: Double? = nil
+        var id: String { label }
+    }
     struct Lead: Identifiable {
         // DB id — nil for the frozen fixture; set from the live pipeline so a row
         // tap can open the lead profile. Identity prefers it (unique per lead);
@@ -57,9 +66,6 @@ struct ABLeadsData: Sendable {
     var effectiveFilter: LeadFilter = .all
     /// Menu contents for the filter bar, counted over the current lead set.
     var facets: FilterFacets = FilterFacets()
-    /// False when the lane reads failed — the lane menu disables itself rather than
-    /// claim every lead has no opener.
-    var laneFilterAvailable: Bool = true
     /// Leads passing the filter (the list is capped; this is the honest total).
     var matchingCount: Int = 0
     /// True when a supplementary read degraded this load.
@@ -67,6 +73,10 @@ struct ABLeadsData: Sendable {
     /// Which reads degraded, named, so the UI can say what is understated rather
     /// than rendering a confident zero. Empty when the load was clean.
     var degradedReads: [String] = []
+    /// Leads (matching the filter's book) with NO `lead_status` row — a broken
+    /// write-path invariant `v_cec_leads.status_row_missing` surfaces expressly
+    /// so a NULL axis can't masquerade as a state. 0 = clean (no note renders).
+    var statusRowsMissing: Int = 0
 
     /// The caption the lead list puts beside its count — derived HERE, from the
     /// applied filter, so the view has one obvious thing to render and the string is
@@ -105,38 +115,35 @@ struct ABLeadsData: Sendable {
             .init(label: "Web Agencies", count: 152),
         ],
         byStatus: [
-            .init(label: "Scraped", count: 379),
-            .init(label: "Enriched", count: 240),
-            .init(label: "Personalized", count: 160),
-            .init(label: "Emailed", count: 285),
-            .init(label: "Replied", count: 74),
-            .init(label: "Bounced", count: 42),
-            .init(label: "Do not contact", count: 60),
+            .init(label: "Scraped", count: 1240, share: 100.0),
+            .init(label: "Researched", count: 1040, share: 83.9),
+            .init(label: "Personalized", count: 940, share: 75.8),
+            .init(label: "Campaigned", count: 861, share: 69.4),
         ],
         recentLeads: [
-            .init(company: "Ostrowen Senior Care", industry: "Assisted Living", location: "Tampa, FL", source: "Google Maps", status: "Emailed", added: "2026-07-20"),
+            .init(company: "Ostrowen Senior Care", industry: "Assisted Living", location: "Tampa, FL", source: "Google Maps", status: "Campaigned", added: "2026-07-20"),
             .init(company: "Sorrelwick Solar Co", industry: "Residential Solar", location: "Phoenix, AZ", source: "Sales Navigator", status: "Replied", added: "2026-07-20"),
-            .init(company: "Quorrel Biolabs", industry: "Biotech", location: "Basel, CH", source: "Apollo", status: "Enriched", added: "2026-07-19"),
+            .init(company: "Quorrel Biolabs", industry: "Biotech", location: "Basel, CH", source: "Apollo", status: "Researched", added: "2026-07-19"),
             .init(company: "Crestline EV Motors", industry: "EV Dealers", location: "Orlando, FL", source: "Sales Navigator", status: "Personalized", added: "2026-07-19"),
-            .init(company: "Kestrelbrook Credit Union", industry: "Credit Unions", location: "Sacramento, CA", source: "Apollo", status: "Emailed", added: "2026-07-18"),
+            .init(company: "Kestrelbrook Credit Union", industry: "Credit Unions", location: "Sacramento, CA", source: "Apollo", status: "Campaigned", added: "2026-07-18"),
             .init(company: "Brightmoor Web Studio", industry: "Web Agencies", location: "Austin, TX", source: "Job Signals", status: "Scraped", added: "2026-07-18"),
-            .init(company: "Fernhollow Assisted Living", industry: "Assisted Living", location: "Naples, FL", source: "Google Maps", status: "Emailed", added: "2026-07-17"),
-            .init(company: "Zephyrine Home Energy", industry: "Residential Solar", location: "Tucson, AZ", source: "Google Maps", status: "Emailed", added: "2026-07-17"),
-            .init(company: "Halvorine Therapeutics", industry: "Biotech", location: "Munich, DE", source: "Apollo", status: "Enriched", added: "2026-07-16"),
-            .init(company: "Wrenfield EV Gallery", industry: "EV Dealers", location: "San Jose, CA", source: "Sales Navigator", status: "Emailed", added: "2026-07-16"),
+            .init(company: "Fernhollow Assisted Living", industry: "Assisted Living", location: "Naples, FL", source: "Google Maps", status: "Campaigned", added: "2026-07-17"),
+            .init(company: "Zephyrine Home Energy", industry: "Residential Solar", location: "Tucson, AZ", source: "Google Maps", status: "Campaigned", added: "2026-07-17"),
+            .init(company: "Halvorine Therapeutics", industry: "Biotech", location: "Munich, DE", source: "Apollo", status: "Researched", added: "2026-07-16"),
+            .init(company: "Wrenfield EV Gallery", industry: "EV Dealers", location: "San Jose, CA", source: "Sales Navigator", status: "Campaigned", added: "2026-07-16"),
             .init(company: "Thornmere Federal CU", industry: "Credit Unions", location: "Fresno, CA", source: "Apollo", status: "Personalized", added: "2026-07-15"),
-            .init(company: "Larkspire & Vine Design", industry: "Web Agencies", location: "Dallas, TX", source: "Job Signals", status: "Emailed", added: "2026-07-15"),
+            .init(company: "Larkspire & Vine Design", industry: "Web Agencies", location: "Dallas, TX", source: "Job Signals", status: "Campaigned", added: "2026-07-15"),
             .init(company: "Hazelquist Care", industry: "Assisted Living", location: "Sarasota, FL", source: "Google Maps", status: "Replied", added: "2026-07-14"),
-            .init(company: "Glimmerhaw Solar Partners", industry: "Residential Solar", location: "Mesa, AZ", source: "Sales Navigator", status: "Emailed", added: "2026-07-14"),
+            .init(company: "Glimmerhaw Solar Partners", industry: "Residential Solar", location: "Mesa, AZ", source: "Sales Navigator", status: "Campaigned", added: "2026-07-14"),
             .init(company: "Cobalt Bio Systems", industry: "Biotech", location: "Copenhagen, DK", source: "Apollo", status: "Scraped", added: "2026-07-13"),
-            .init(company: "Corvane Electric Autos", industry: "EV Dealers", location: "Las Vegas, NV", source: "Sales Navigator", status: "Emailed", added: "2026-07-13"),
-            .init(company: "Brindleback CU", industry: "Credit Unions", location: "San Diego, CA", source: "Apollo", status: "Emailed", added: "2026-07-12"),
-            .init(company: "Inkwhistle Studios", industry: "Web Agencies", location: "Houston, TX", source: "Job Signals", status: "Enriched", added: "2026-07-12"),
-            .init(company: "Bramblewick Living", industry: "Assisted Living", location: "Clearwater, FL", source: "Google Maps", status: "Emailed", added: "2026-07-11"),
-            .init(company: "Cobblequartz Solar", industry: "Residential Solar", location: "Scottsdale, AZ", source: "Google Maps", status: "Bounced", added: "2026-07-11"),
-            .init(company: "Tidemarrow Biometrics", industry: "Biotech", location: "Amsterdam, NL", source: "Apollo", status: "Emailed", added: "2026-07-10"),
+            .init(company: "Corvane Electric Autos", industry: "EV Dealers", location: "Las Vegas, NV", source: "Sales Navigator", status: "Campaigned", added: "2026-07-13"),
+            .init(company: "Brindleback CU", industry: "Credit Unions", location: "San Diego, CA", source: "Apollo", status: "Campaigned", added: "2026-07-12"),
+            .init(company: "Inkwhistle Studios", industry: "Web Agencies", location: "Houston, TX", source: "Job Signals", status: "Researched", added: "2026-07-12"),
+            .init(company: "Bramblewick Living", industry: "Assisted Living", location: "Clearwater, FL", source: "Google Maps", status: "Campaigned", added: "2026-07-11"),
+            .init(company: "Cobblequartz Solar", industry: "Residential Solar", location: "Scottsdale, AZ", source: "Google Maps", status: "Personalized", added: "2026-07-11"),
+            .init(company: "Tidemarrow Biometrics", industry: "Biotech", location: "Amsterdam, NL", source: "Apollo", status: "Campaigned", added: "2026-07-10"),
             .init(company: "Velocity EV Outlet", industry: "EV Dealers", location: "Reno, NV", source: "Sales Navigator", status: "Scraped", added: "2026-07-10"),
-            .init(company: "Thistlecombe CU", industry: "Credit Unions", location: "Bakersfield, CA", source: "Apollo", status: "Emailed", added: "2026-07-09"),
+            .init(company: "Thistlecombe CU", industry: "Credit Unions", location: "Bakersfield, CA", source: "Apollo", status: "Campaigned", added: "2026-07-09"),
             .init(company: "Glintmoor Web Co", industry: "Web Agencies", location: "San Antonio, TX", source: "Job Signals", status: "Personalized", added: "2026-07-09"),
         ],
         byRegion: [
@@ -191,19 +198,19 @@ struct ABLeadsData: Sendable {
 }
 
 // Status -> role color mapping (two-accent discipline; decision-log #5).
+// Vocabulary matches what `LeadFacets.stage` can actually emit (7.2): the
+// retired Emailed/Enriched/Bounced/"Do not contact" labels are gone — dead
+// style vocabulary invites silent re-introduction (design review).
 enum ABStatusRole {
-    case reward      // Replied -> pink
-    case active      // Emailed -> teal
-    case warn        // Bounced / Do not contact -> warm neutral
-    case neutral     // Scraped / Enriched / Personalized
+    case reward      // Replied -> pink (the reward outcome, past Campaigned)
+    case active      // Campaigned -> teal
+    case neutral     // Scraped / Researched / Personalized
 
     init(_ status: String) {
         switch status.lowercased() {
-        case "replied":                       self = .reward
-        // "campaigned" is the live pipeline's outreach stage (= emailed).
-        case "emailed", "campaigned":         self = .active
-        case "bounced", "do not contact":     self = .warn
-        default:                              self = .neutral
+        case "replied":     self = .reward
+        case "campaigned":  self = .active
+        default:            self = .neutral
         }
     }
 }
@@ -226,39 +233,40 @@ extension ABLeadsData {
     ///   a whole-table `scraped` in the header beside a window-scoped `scraped` in
     ///   the hero, and a reply rate of 500%. One population, always.
     /// - `scraped`  = leads matching the filter.
-    /// - `emailed`  = matching leads at the `campaigned` enrichment stage (added to
-    ///   an outbound campaign).
-    /// - `replies`  = matching leads that BOTH replied and reached `campaigned`, so
+    /// - `emailed`  = matching leads with a send ON RECORD (`v_cec_sent_events`
+    ///   membership — the permanent log, not the `outreach` axis; the two diverge
+    ///   on 45 live leads, open finding on the plan).
+    /// - `replies`  = matching leads that BOTH replied and were emailed, so
     ///   the numerator is a subset of the denominator and the rate cannot exceed
-    ///   100% (a lead that replied while still at `personalized` — a data-integrity
+    ///   100% (a lead with an inbound row but no send on record — a data-integrity
     ///   problem upstream — must not render as 500%).
     /// - weekly series share ONE 12-week window anchored to `now` (aligned axes):
     ///   added counts distinct matching leads by `created_at`; messaged counts
-    ///   DISTINCT matching leads per week by `send_queue.sent_at`. Both fail-open to
-    ///   a zero-filled series.
+    ///   DISTINCT matching leads per week by sent-event `sent_at`. Both fail-open
+    ///   to a zero-filled series.
     /// - breakdowns + facet menus count over the same matching set.
     ///
     /// `now` is injectable for deterministic tests; production passes the wall clock.
     init(snapshot: LeadSnapshot, filter: LeadFilter = .all, now: Date = Date()) {
         let inputs = snapshot.inputs
         let facets = snapshot.facets
-        // A lane filter over degraded lane reads would silently answer "everything
-        // is unpersonalized". Drop that dimension rather than answer wrongly — but
-        // record the REQUESTED filter, so the bar keeps editing what the user asked
-        // for and a transient read failure can't silently discard their selection.
-        let effective = inputs.lanesDegraded ? filter.droppingLane() : filter
+        let effective = filter
         let matchingIndices = facets.indices.filter { effective.matches(facets[$0]) }
         let matching = matchingIndices.map { inputs.leads[$0] }
         let matchingFacets = matchingIndices.map { facets[$0] }
         let matchingIDs = Set(matching.map(\.id))
 
-        let emailedIDs = Set(matching.filter { ABLeadsData.isCampaigned($0) }.map(\.id))
+        // ONE emailed rule, shared with the per-row stage labels: the sent-event
+        // set normally; the outreach-axis fallback when that read degraded (an
+        // empty event set is then a failure, not "nobody was ever emailed").
+        let emailedIDs = snapshot.sentEventsDegraded
+            ? Set(matching.filter(LeadFacets.emailedPerAxis).map(\.id))
+            : snapshot.emailedLeadIDs.intersection(matchingIDs)
         let scraped = matching.count
         let emailed = emailedIDs.count
         let replies = inputs.repliedLeadIDs.intersection(emailedIDs).count
 
         self.effectiveFilter = effective
-        self.laneFilterAvailable = !inputs.lanesDegraded
         self.partial = inputs.partial
         self.degradedReads = inputs.degradedReads
         self.matchingCount = matching.count
@@ -280,7 +288,11 @@ extension ABLeadsData {
         self.bySource = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.source }
         self.byIndustry = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.industry }
         self.byRegion = ABLeadsData.breakdown(matchingFacets, topN: 6) { $0.region }
-        self.byStatus = ABLeadsData.statusBreakdown(matching)
+        self.byStatus = ABLeadsData.statusFunnel(matching, emailedCount: emailed)
+        // Disclose broken write-path invariants: a lead with NO lead_status row
+        // renders with default-looking axes, and nothing else on the tab would
+        // say so (p7a5 added the flag expressly for this surface).
+        self.statusRowsMissing = snapshot.statusRowsMissing
         self.facets = FilterFacets.build(facets, filter: effective)
         // Disclose whenever the snapshot itself is a window rather than the book.
         // Phrased as a caveat about the SOURCE, not as a count of what's displayed:
@@ -300,26 +312,19 @@ extension ABLeadsData {
     /// One DB row → one list row, using the facets already derived for it so the
     /// row, the breakdown panel and the filter menu spell a null column the SAME
     /// way (they used to disagree: "—" in the row, "Unknown" in the panel).
+    /// A row with no facets (a caller outside any snapshot) derives them with no
+    /// sent-event knowledge — its stage can then understate Campaigned, never
+    /// overstate it.
     static func lead(_ row: LeadRow, facets: LeadFacets? = nil) -> Lead {
-        let f = facets ?? LeadFacets(lead: row, deepLane: false, personalized: false)
+        let f = facets ?? LeadFacets(lead: row, emailed: false)
         return Lead(leadID: row.id,
                     company: row.companyName?.nilIfEmpty ?? "Unknown",
                     industry: f.industry,
                     location: f.location,
                     source: f.source,
-                    status: stageLabel(row.enrichmentStage),
+                    status: f.stage,
                     added: dayLabel(row.createdAt),
                     firstName: row.firstName?.nilIfEmpty)
-    }
-
-    /// Did this lead reach the outreach stage? One spelling of the comparison.
-    static func isCampaigned(_ lead: LeadRow) -> Bool {
-        (lead.enrichmentStage ?? "").lowercased() == "campaigned"
-    }
-
-    /// Leads that reached the outreach stage.
-    static func campaignedCount(_ leads: [LeadRow]) -> Int {
-        leads.filter(isCampaigned).count
     }
 
     /// `n/d` as a percentage, guarded: a zero (or negative) denominator yields 0,
@@ -335,12 +340,6 @@ extension ABLeadsData {
         let parts = [city, state].compactMap { $0?.nilIfEmpty }
         if !parts.isEmpty { return parts.joined(separator: ", ") }
         return location?.nilIfEmpty ?? "—"
-    }
-
-    /// Locale-stable display casing for a stage token; nil/empty → "Unknown".
-    static func stageLabel(_ stage: String?) -> String {
-        guard let s = stage?.nilIfEmpty else { return "Unknown" }
-        return s.capitalized(with: Locale(identifier: "en_US_POSIX"))
     }
 
     /// `created_at` timestamp → a stable "yyyy-MM-dd" day label (matching the
@@ -366,14 +365,34 @@ extension ABLeadsData {
         return topBreakdowns(counts, topN: topN)
     }
 
-    /// Pipeline-stage rollup over the leads currently shown. Counted from the
-    /// snapshot (not the exact per-stage HEAD reads) precisely so it MOVES with the
-    /// filter — a "By status" panel frozen at full-table totals beside a filtered
-    /// list is the mixed view this tab is designed not to produce.
-    static func statusBreakdown(_ leads: [LeadRow]) -> [Breakdown] {
-        var counts: [String: Int] = [:]
-        for lead in leads { counts[stageLabel(lead.enrichmentStage), default: 0] += 1 }
-        return topBreakdowns(counts, topN: 8)
+    /// Pipeline-stage FUNNEL over the leads currently shown (7.2 rollup rebuild):
+    /// Scraped = every matching lead, Researched = `has_research`, Personalized =
+    /// the view's guarded-copy boolean, Campaigned = leads with a send on record.
+    /// Buckets OVERLAP by design (a campaigned lead is also researched) — this is
+    /// a funnel, not a partition, so it renders in stage order rather than count
+    /// order, and every row carries its retention SHARE of the Scraped
+    /// denominator so the overlapping semantics are legible (without it the
+    /// panel reads as a breakdown whose numbers don't sum — design review).
+    /// The funnel is NOT forced monotone: Campaigned comes from the sent-event
+    /// log while Personalized comes from the view boolean, and the two can
+    /// legitimately diverge (the 19 needs_manual_review leads have sends on
+    /// record but no longer count as personalized) — an inversion is a fact
+    /// about the book, and the share figures make it readable rather than
+    /// looking like a rendering fault. Counted from the snapshot precisely so
+    /// it MOVES with the filter.
+    static func statusFunnel(_ leads: [LeadRow], emailedCount: Int) -> [Breakdown] {
+        let scraped = leads.count
+        func share(_ n: Int) -> Double? { scraped > 0 ? percent(n, of: scraped) : nil }
+        return [
+            Breakdown(label: "Scraped", count: scraped, share: share(scraped)),
+            Breakdown(label: "Researched",
+                      count: leads.count(where: { $0.hasResearch == true }),
+                      share: share(leads.count(where: { $0.hasResearch == true }))),
+            Breakdown(label: "Personalized",
+                      count: leads.count(where: { $0.personalized == true }),
+                      share: share(leads.count(where: { $0.personalized == true }))),
+            Breakdown(label: "Campaigned", count: emailedCount, share: share(emailedCount)),
+        ]
     }
 
     private static func topBreakdowns(_ counts: [String: Int], topN: Int) -> [Breakdown] {

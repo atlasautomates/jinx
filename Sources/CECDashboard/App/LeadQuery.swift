@@ -4,25 +4,43 @@ import Foundation
 /// Prints ONE spoken-friendly line to stdout and exits 0; errors go to stderr, exit 1.
 ///
 ///   CECDashboard --query count
-///   CECDashboard --query by-tier
+///   CECDashboard --query by-industry
 ///
 /// Why a CLI and not `shortcuts run`: auto-provided App Shortcuts (the Siri surface in
 /// `Intents.swift`) don't appear in `shortcuts list` and aren't runnable by name from the
 /// CLI — so a subprocess gate (Aris) can't reach them that way. This mode exposes the same
-/// data the App Intents speak, reusing the dashboard read path (LeadsRepository + Keychain
-/// anon key), as a plain subprocess Aris can call and read back. Phrasing intentionally
-/// mirrors `Intents.swift` (presentation only — not a data contract; kept in step by hand).
+/// data the App Intents speak, reusing the dashboard read path (LeadsRepository + the
+/// Keychain reader JWT), as a plain subprocess Aris can call and read back. The metric
+/// vocabulary is a CROSS-PROCESS CONTRACT with the Aris gate's `_LEAD_METRICS` allow-list
+/// (builds/aris-voice-gate/tools/handlers.py) — pinned by
+/// `.claude/tests/test_cec_view_contract.py`, because "kept in step by hand" broke once.
 enum LeadQuery {
     static func run() -> Never {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--query"), i + 1 < args.count else {
-            fail("usage: --query <count|by-source|by-industry|by-tier>")
+            fail("usage: --query <count|by-source|by-industry>")
         }
         let metric = args[i + 1].lowercased()
+        // Validate BEFORE touching the Keychain: an unknown metric needs no
+        // credential, and a stale allow-list entry upstream was burning a
+        // Keychain access (which can prompt) for a request rejected
+        // unconditionally (contention lens).
+        let known: Set<String> = ["count", "total", "total-leads",
+                                  "by-source", "source", "sources",
+                                  "by-industry", "industry", "industries"]
+        guard known.contains(metric) else {
+            fail(QueryError.unknownMetric(metric).errorDescription ?? "unknown metric")
+        }
 
         let semaphore = DispatchSemaphore(value: 0)
-        var output: String?
-        var errorMessage = "unknown error"
+        // Locked box, not captured vars: mutable locals captured by a Task are a
+        // Swift 6 sending error, and the semaphore is the happens-before barrier
+        // (the SupabaseCheck.Result discipline).
+        final class Result: @unchecked Sendable {
+            var output: String?
+            var errorMessage = "unknown error"
+        }
+        let result = Result()
 
         // Mirrors SupabaseCheck: init() blocks the main thread on the wait below, so this
         // Task body must stay off the main actor (pure networking + Keychain) to avoid a
@@ -30,20 +48,20 @@ enum LeadQuery {
         Task {
             do {
                 let repo = LeadsRepository(client: try SupabaseClient.make())
-                output = try await answer(for: metric, repo: repo)
+                result.output = try await answer(for: metric, repo: repo)
             } catch {
-                errorMessage = error.localizedDescription
+                result.errorMessage = error.localizedDescription
             }
             semaphore.signal()
         }
         if semaphore.wait(timeout: .now() + 20) == .timedOut {
             fail("timed out after 20s")
         }
-        if let output {
+        if let output = result.output {
             print(output)
             exit(0)
         }
-        fail(errorMessage)
+        fail(result.errorMessage)
     }
 
     private static func answer(for metric: String, repo: LeadsRepository) async throws -> String {
@@ -58,9 +76,8 @@ enum LeadQuery {
         case "by-industry", "industry", "industries":
             let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
             return LeadAnswers.breakdown(r.counts, singular: "industry", plural: "industries", sampled: r.sampled)
-        case "by-tier", "tier", "tiers":
-            let r = await repo.tierCountsResult()
-            return LeadAnswers.breakdown(r.counts, singular: "tier", plural: "tiers", incomplete: !r.ok)
+        // by-tier retired with lead_enrichment.lead_tier (7.2) — runtime
+        // score_lead is the only tier source now, and it never landed in a column.
         default:
             throw QueryError.unknownMetric(metric)
         }
@@ -71,7 +88,7 @@ enum LeadQuery {
         var errorDescription: String? {
             switch self {
             case .unknownMetric(let m):
-                return "unknown metric '\(m)' (use count|by-source|by-industry|by-tier)"
+                return "unknown metric '\(m)' (use count|by-source|by-industry)"
             }
         }
     }

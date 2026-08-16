@@ -296,3 +296,144 @@ rejected) with a **follow-up**: move the write behind a Modal bearer-auth
 endpoint so the pending/claimed guards become server-enforced. Subject
 whitespace normalization mirrored sink-side in smtp_send.py is deferred to the
 next coordinated Modal redeploy (client-side strip covers the only new writer).
+
+# Leads-only remap onto the v_cec_* reader boundary — SHIP notes (2026-08-16)
+
+leads-domain-split task 7.2 (plan: `.claude/plans/leads-db-domain-split.md`).
+Adrian's ruling: Leads tab ONLY; Pipeline (unused) + Campaigns (write access;
+may return as its own app) DEPRECATED — deleted, not hidden, because under the
+reader credential their table reads have no data source.
+
+- **Credential**: Keychain `supabase_api_key` now holds the `arcane_read_cec`
+  JWT (SELECT on exactly the six `v_cec_*` views). The `supabase_write_key`
+  item (write key, staged-copy revisions) lost its last consumer — the
+  revision editor left with the Campaigns tab; delete the Keychain item.
+- **Leads book**: `leads` → `v_cec_leads` (same keyset walk). `enrichment_stage`
+  retired; the select adds `outreach,deepening,personalized,has_research,
+  status_row_missing`. Lane = `deepening ≠ 'none'` / the view's guarded-copy
+  `personalized` boolean — per-row, so the lane can no longer degrade
+  independently (ABUnavailableChip + `lanesDegraded` machinery deleted).
+- **Emailed truth** = `v_cec_sent_events` membership (the permanent
+  lead_interactions log), NOT the `outreach` axis (45-lead divergence, open
+  finding) and NOT the swept `send_queue` (chart was blank; ~16wk of history
+  restored). The walk is UNWINDOWED so the emailed KPI is all-time; the trend
+  windows locally.
+- **Status panel** is now a stage FUNNEL (Scraped=all, Researched=has_research,
+  Personalized=personalized, Campaigned=sent-set) — overlapping by design,
+  rendered in stage order. Row status uses the same furthest-stage derivation.
+- **Replied set** = `v_cec_lead_interactions` `direction=eq.inbound` (id-keyset).
+- **Profile** = ONE `v_cec_lead_profile` read (lead + generated halves are two
+  decodes of the same response; all-NULL generated → nil so the Personalization
+  card suppresses) + `v_cec_lead_interactions` timeline. Source/Status/Tier
+  facts and the tier badge retired; `web_research_json` → `research`.
+- **Voice**: `--query by-tier` and the Siri tier dimension retired
+  (lead_tier is gone; runtime score_lead is the only tier source).
+- **Deleted**: Campaigns/Pipeline/Backlog views+repos+models, widget grid
+  (Widgets/, Grid/, Shell/, Dashboard/Layout/Packer/MockData), write path
+  (SupabaseWriteClient, RevisionLint, `--check-write-key`).
+- Verified: `swift build` clean, `--selftest` PASS, stills render
+  (leads/leads-filtered/profile), residual grep for dead surfaces = 0 hits.
+
+## 7.2 review-round fixes (2026-08-16, same session)
+
+Seven reviewers (code/qa/reliability/macos/swift-semantics/design + a
+view-contract lens) → one fix batch:
+
+- **Replied set** scoped to `interaction_type=eq.email` (a Cal booking or
+  magnet view is not a reply); `leadIDsResult` takes a filters array.
+- **Search**: facets now resolve whenever a resolver exists — the default
+  no-filter state was rendering campaigned hits as "Personalized" (QA
+  regression). Search select carries `full_name` (107 live divergences).
+- **Row labels**: promoted to "Replied" via the replied set (pink reward role
+  reachable again); under a FAILED sent-events read every emailed test falls
+  back to the `outreach` axis (an empty event log is a failure, not "nobody
+  emailed") — this is what finally consumes the axis column. `status_row_missing`
+  counts into a filter-bar disclosure.
+- **Funnel** retitled "Stage funnel" + per-row retention share of Scraped —
+  overlap semantics legible next to the true partitions; frozen `ab` fixture
+  rewritten to the shipped vocabulary (6 stills were rendering deleted UI).
+- **--check-supabase** rewritten: one-row readability probes (the maxPages:1
+  walks inverted ok in both directions), ALL probes fold into the exit code,
+  + search/count-path probes + credential-expiry decode (FAIL when expired,
+  warn <30d — the app's Keychain copy is the one copy ce doctor can't see).
+- **Voice**: `breakdownWindow` = the PostgREST 1000 cap and `sampled` compares
+  against the real total (the caveat was unreachable); tier retired from the
+  Aris gate allow-list + tool description (it reported the dead metric as a
+  database outage) and from app-access's worked examples.
+- **install-mac.sh**: credential-order preflight documented (swap Keychain
+  FIRST), acceptance = exit code + anchored `^You have [0-9]+ leads\.$`, and
+  the rollback re-verifies the previous build before calling it live.
+  `project.yml` versions bumped to 3 (App Intents surface changed).
+- **Swift 6 hygiene**: DateParse → `Date.ISO8601FormatStyle` (Sendable; the
+  shared ISO8601DateFormatter statics were a compiler-verified data-race
+  error), `refreshOnWake`'s task group → two `.task` children, `Window` scene
+  (⌘N duplicated pollers and forked the pins file), stored cancel-and-replace
+  refresh task, LeadQuery locals → locked box, `@Sendable` client factory.
+- **Profile**: enrichment decode `try?` (one malformed research payload took
+  down the whole dossier), Personalization card gated on real content
+  (research-only leads got an empty card), `casualized_shape` corruption
+  surfaced as a fact, opener/offer blocks = the sheet's one accent moment.
+- **Pins**: `.claude/tests/test_cec_view_contract.py` (7 tests, 3 mutations
+  killed) — Swift selects ⊆ view DDL, Aris `_LEAD_METRICS` ⊆ binary metrics,
+  breakdownWindow = page cap. SelfTest: stage-ladder pins incl. Replied +
+  degraded-axis fallback + clean-empty non-fallback, emailed-aware narrow
+  resolver + no-filter coverage, timeout = failure, pasteboard restored.
+  util-iterate registry `test_hint` now runs `--selftest` (swift test was a
+  no-op — no test target).
+
+Accepted/deferred with rationale: sentEvents per-row type-mismatch stays
+skip-and-count (PostgREST cannot emit non-string for these view columns;
+defensive only). Lane labels vs funnel "Personalized" naming kept — lane
+`standard` EXCLUDES deep leads, funnel Personalized includes them; not one
+boolean. KPI "≥" floor rendering superseded by the axis fallback (the KPI now
+approximates under degradation instead of flooring to zero; chip names the
+read). key rotation is tracked on the private plan;
+`supabase_write_key` Keychain deletion is an install-step of this change.
+
+### Round-2 fixes (delta r1 + headless-contention lens, same session)
+
+- RevisionLint pins RETIRED with inverted tombstones (ce doctor names the
+  retirement — never a silent skip — and FAILs if the file reappears without
+  the reconciliation; same inversion in test_one_method_pins). Battery 167/167.
+- Two behavioural pins added + mutation-proven: fetch() must send BOTH
+  replied-set predicates over the wire (stub-request assertion), and the
+  ABLeadsData half of the axis fallback (emailed KPI / funnel Campaigned /
+  replies under a failed sent-events read).
+- Intents deadline made REAL: Keychain.exists preflight + leakable-GCD-thread
+  race via continuation (the task group awaited the orphaned SecItemCopyMatching
+  — proven with a compiled repro; Siri hung past its own timeout).
+- LeadProfileModel's Keychain read hoisted off the main actor (the one seam
+  the other view models' hoists never covered).
+- --check-supabase: ONE Keychain read shared by client + expiry decode,
+  credential line computed before the probes (survives a thrown essential
+  probe), expired folds into exit code, ceil'd days. Compile-time isolation
+  pin replaces the "enforced by review" wish.
+- Wake/activation throttle floors on lastAttemptAt (was vacuous while loads
+  failed); requestLoad = generation-guarded + TaskBox deinit cancel;
+  --fixture pins point at a per-run scratch dir (live-network seam closed);
+  activate() no longer force-steals focus on background intent launches;
+  CECAppDelegate makes Dock-reopen explicit for the single Window scene;
+  LeadQuery validates the metric BEFORE the Keychain read (pre-validation set
+  pinned equal to the answer switch); install-mac.sh warns when the quit
+  request is denied; corrupt generated decode logs + marks the dossier
+  partial with its own banner wording.
+- MANUAL VERIFY AT INSTALL: launch → ⌘W → click the Dock icon; the window
+  must come back (Window-scene reopen; delegate fallback added but the
+  behavior wants one real click).
+
+### Install-time catch: the two-key wire contract (2026-08-16)
+
+First install attempt FAILED acceptance (and the new both-builds-broken
+rollback message earned its keep on its first firing): the app sent the ONE
+Keychain value as both `apikey` and the bearer — and Supabase's gateway
+validates `apikey` against KNOWN keys, so the reader JWT there is a hard 401
+before PostgREST runs. This is 6.1 intel the PYTHON factory already encodes
+(apikey = anon, class JWT rides only the bearer) and every review lens missed
+on the Swift side. Fix: two Keychain items (`supabase_api_key` = reader JWT →
+bearer; NEW `supabase_anon_key` = anon key → apikey header), fail-closed when
+either is absent, `--check-supabase` names a missing anon item, Intents
+preflights both, installer note updated. PINNED behaviourally: the selftest
+asserts on a captured wire request that apikey carries the anon value and
+Authorization carries the bearer — the mirror of the Python factory's
+AuthMechanism pins. Second install: acceptance PASSED ("You have 3455
+leads."), live `--check-supabase` all-OK with `credential: expires in 359d`.

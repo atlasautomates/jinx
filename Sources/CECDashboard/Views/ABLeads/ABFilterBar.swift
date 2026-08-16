@@ -38,24 +38,21 @@ struct ABFilterBar: View {
                 // filter — a suppressed dimension must not light it.
                 .foregroundStyle(data.effectiveFilter.isActive ? DesignTokens.accent : DesignTokens.textGhost)
 
-            if data.laneFilterAvailable {
-                // Keyed on `rawValue`, not on the display label: routing a selection
-                // back through human-readable text means renaming a label silently
-                // breaks the control (the lookup returns nil and reads as "All").
-                ABFilterMenu(
-                    title: "Lane", selection: filter.lane?.rawValue,
-                    display: { LeadFilter.Lane(rawValue: $0)?.label ?? $0 },
-                    options: data.facets.lanes.map { .init(value: $0.lane.rawValue, count: $0.count) },
-                                        onPick: { picked in
-                        var next = filter
-                        next.lane = picked.flatMap(LeadFilter.Lane.init(rawValue:))
-                        onChange(next)
-                    })
-            } else {
-                // The lane reads failed; offering the menu would let the user filter
-                // on a classification we know is wrong (see `lanesDegraded`).
-                ABUnavailableChip(title: "Lane")
-            }
+            // Keyed on `rawValue`, not on the display label: routing a selection
+            // back through human-readable text means renaming a label silently
+            // breaks the control (the lookup returns nil and reads as "All").
+            // (The lane dimension can no longer degrade independently — its
+            // inputs ride the essential v_cec_leads read since the 7.2 remap —
+            // so the old ABUnavailableChip fallback is structurally gone.)
+            ABFilterMenu(
+                title: "Lane", selection: filter.lane?.rawValue,
+                display: { LeadFilter.Lane(rawValue: $0)?.label ?? $0 },
+                options: data.facets.lanes.map { .init(value: $0.lane.rawValue, count: $0.count) },
+                                    onPick: { picked in
+                    var next = filter
+                    next.lane = picked.flatMap(LeadFilter.Lane.init(rawValue:))
+                    onChange(next)
+                })
 
             ABFilterMenu(title: "Region", selection: filter.region, options: data.facets.regions,
                                                   onPick: { picked in
@@ -83,6 +80,17 @@ struct ABFilterBar: View {
                     .font(.abMono(DesignTokens.textXs))
                     .foregroundStyle(DesignTokens.textGhost)
                     .help("The lead snapshot was capped; figures cover these rows only.")
+            }
+            if data.statusRowsMissing > 0 {
+                // A broken write-path invariant (leads with no lead_status row)
+                // renders with default-looking axes — disclose it rather than let
+                // NULL masquerade as a state (p7a5's stated purpose for the flag).
+                Text("\(data.statusRowsMissing) missing status rows")
+                    .font(.abMono(DesignTokens.textXs))
+                    .foregroundStyle(DesignTokens.statusRedText)
+                    .help("These leads have no lead_status row — their lane and stage "
+                        + "render from defaults, and the pipeline's write invariant is "
+                        + "broken for them. Worth a doctor run.")
             }
         }
     }
@@ -211,26 +219,6 @@ extension View {
                 lineWidth: 1))
             .contentShape(Capsule())
             .animation(ABMotion.fast, value: hovering)
-    }
-}
-
-/// A dimension we cannot compute right now — shown disabled rather than hidden,
-/// so a missing menu is never mistaken for a missing feature.
-private struct ABUnavailableChip: View {
-    let title: String
-
-    var body: some View {
-        HStack(spacing: DesignTokens.space1) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 8, weight: .semibold))
-            Text(title)
-                .font(.adventor(DesignTokens.textXs))
-        }
-        .foregroundStyle(DesignTokens.textGhost)
-        .padding(.horizontal, DesignTokens.space2)
-        .padding(.vertical, DesignTokens.controlPaddingY)
-        .overlay(Capsule().strokeBorder(DesignTokens.borderSubtle, lineWidth: 1))
-        .help("Lane data could not be read on this load — filtering by it would be wrong.")
     }
 }
 

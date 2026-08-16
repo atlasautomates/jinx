@@ -25,7 +25,6 @@ struct ABStatusPill: View {
         switch role {
         case .reward:  return DesignTokens.accentPinkStrong
         case .active:  return DesignTokens.accentStrong
-        case .warn:    return DesignTokens.statusRedText
         case .neutral: return DesignTokens.textSecondary
         }
     }
@@ -33,7 +32,6 @@ struct ABStatusPill: View {
         switch role {
         case .reward:  return DesignTokens.accentPinkBg
         case .active:  return DesignTokens.accentBg
-        case .warn:    return DesignTokens.statusRedBg
         case .neutral: return DesignTokens.bgHighlight
         }
     }
@@ -41,7 +39,6 @@ struct ABStatusPill: View {
         switch role {
         case .reward:  return DesignTokens.accentPinkBorder
         case .active:  return DesignTokens.accentBorder
-        case .warn:    return DesignTokens.statusRedText.opacity(0.4)
         case .neutral: return DesignTokens.borderDefault
         }
     }

@@ -77,7 +77,7 @@ final class LeadSearchModel {
 
     /// Run the query currently in the box (Enter). A blank/too-short term clears
     /// rather than searching, so ⌫⌫⏎ puts the tab back the way it was.
-    func submit(client: @escaping () throws -> SupabaseClient = { try SupabaseClient.make() }) {
+    func submit(client: @escaping @Sendable () throws -> SupabaseClient = { try SupabaseClient.make() }) {
         guard let term = LeadsRepository.searchTerm(query) else {
             // Dismiss the RESULTS, keep the text. Routing this to `clear()` deleted
             // what the user had typed: backspacing to one character and pressing
@@ -114,7 +114,7 @@ final class LeadSearchModel {
     }
 
     private nonisolated static func runSearch(
-        _ term: String, client: () throws -> SupabaseClient
+        _ term: String, client: @Sendable () throws -> SupabaseClient
     ) async throws -> [LeadRow] {
         try await LeadsRepository(client: try client()).search(term)
     }
@@ -136,19 +136,31 @@ final class LeadSearchModel {
 
     /// PURE (selftest target): split hits into shown and hidden-by-filter.
     ///
+    /// Facets are resolved whenever a resolver EXISTS — not only when the filter
+    /// is active. The facets carry the row's Status label (stage needs the
+    /// snapshot's sent-event/replied sets since 7.2), so skipping resolution in
+    /// the default no-filter state rendered every campaigned search hit as
+    /// "Personalized" (QA regression, 7.2). Only the `matches` test is gated on
+    /// the scope.
+    ///
     /// With no facet resolver the filter cannot be evaluated, so nothing is hidden —
     /// showing fewer leads than exist because we couldn't classify them would be the
     /// silent-omission failure this whole feature is built to avoid.
     static func narrow(term: String, rows: [LeadRow], scope: LeadFilter,
                        facets: ((LeadRow) -> LeadFacets)?, ignoring: Bool) -> SearchState {
-        guard scope.isActive, !ignoring, let facets else {
+        guard let facets else {
             return .results(term: term, hits: rows.map { ABLeadsData.lead($0) }, hiddenByFilter: 0)
         }
+        let filtering = scope.isActive && !ignoring
         var shown: [ABLeadsData.Lead] = []
         var hidden = 0
         for row in rows {
             let f = facets(row)
-            if scope.matches(f) { shown.append(ABLeadsData.lead(row, facets: f)) } else { hidden += 1 }
+            if !filtering || scope.matches(f) {
+                shown.append(ABLeadsData.lead(row, facets: f))
+            } else {
+                hidden += 1
+            }
         }
         return .results(term: term, hits: shown, hiddenByFilter: hidden)
     }

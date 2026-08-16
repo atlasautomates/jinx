@@ -4,7 +4,7 @@ import Foundation
 /// App Intents — the Siri / Shortcuts surface (and, via `shortcuts run`, the Aris
 /// voice-gate surface). The headless query intents answer by voice WITHOUT opening
 /// the window, reusing the same read path as the dashboard (`LeadsRepository` +
-/// Keychain anon key). `OpenDashboardIntent` foregrounds the UI.
+/// the Keychain reader JWT). `OpenDashboardIntent` foregrounds the UI.
 ///
 /// Auto-discovered by the App Intents framework — no wiring in the @main App needed.
 /// Requires the app to have been launched once (to grant the Keychain "Always Allow").
@@ -36,16 +36,36 @@ private func makeRepository() async throws -> LeadsRepository {
     return LeadsRepository(client: client)
 }
 
+/// A real deadline, not a decorative one. The previous task-group shape
+/// picked its VALUE at the deadline but could not RETURN until the orphaned
+/// `SecItemCopyMatching` finished — `withTaskGroup` awaits all children, and
+/// cancellation cannot interrupt a synchronous Security call — so the exact
+/// scenario the deadline exists for (an invisible auth prompt in a background
+/// launch) hung the intent anyway (contention lens, proven with a compiled
+/// repro). Now the blocking read runs on a GCD thread we are WILLING TO LEAK
+/// while a continuation is resumed by whichever side finishes first; the
+/// attributes-only `Keychain.exists` preflight short-circuits the common
+/// not-configured case without ever materializing the secret or prompting.
 private func boundedClientBuild(seconds: Double) async -> SupabaseClient? {
-    await withTaskGroup(of: SupabaseClient?.self) { group in
-        group.addTask { try? SupabaseClient.make() }
-        group.addTask {
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            return nil   // deadline won the race → treat as not-configured
+    guard Keychain.exists(service: SupabaseConfig.keychainService,
+                          account: SupabaseConfig.keychainAccount),
+          Keychain.exists(service: SupabaseConfig.keychainService,
+                          account: SupabaseConfig.anonKeychainAccount) else { return nil }
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        func claim() -> Bool { lock.lock(); defer { lock.unlock() }
+            if fired { return false }; fired = true; return true }
+    }
+    let once = Once()
+    return await withCheckedContinuation { cont in
+        DispatchQueue.global(qos: .userInitiated).async {
+            let client = try? SupabaseClient.make()   // may block on a prompt
+            if once.claim() { cont.resume(returning: client) }
         }
-        let first = await group.next() ?? nil
-        group.cancelAll()
-        return first
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
+            if once.claim() { cont.resume(returning: nil) }
+        }
     }
 }
 
@@ -65,14 +85,17 @@ struct LeadCountIntent: AppIntent {
 
 // MARK: - Lead breakdown by dimension (headless, spoken)
 
+// `tier` retired with lead_enrichment.lead_tier (7.2 remap): the column is gone
+// and runtime score_lead is the only tier source. Removing an AppEnum case is
+// safe — a stale Shortcut carrying "tier" fails parameter resolution rather
+// than fetching from a dead table.
 enum LeadBreakdownDimension: String, AppEnum {
-    case source, industry, tier
+    case source, industry
 
     static let typeDisplayRepresentation = TypeDisplayRepresentation(name: "Lead Breakdown")
     static let caseDisplayRepresentations: [LeadBreakdownDimension: DisplayRepresentation] = [
         .source: "Source",
         .industry: "Industry",
-        .tier: "Tier",
     ]
 
     /// Spoken nouns — keeps voice output grammatical (avoids "industrys") instead of
@@ -81,21 +104,19 @@ enum LeadBreakdownDimension: String, AppEnum {
         switch self {
         case .source: return "source"
         case .industry: return "industry"
-        case .tier: return "tier"
         }
     }
     var spokenPlural: String {
         switch self {
         case .source: return "sources"
         case .industry: return "industries"
-        case .tier: return "tiers"
         }
     }
 }
 
 struct LeadBreakdownIntent: AppIntent {
     static let title: LocalizedStringResource = "Lead Breakdown"
-    static let description = IntentDescription("The top groups of leads by source, industry, or tier.")
+    static let description = IntentDescription("The top groups of leads by source or industry.")
 
     @Parameter(title: "Group by")
     var dimension: LeadBreakdownDimension
@@ -106,7 +127,7 @@ struct LeadBreakdownIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let repo = try await makeRepository()
-        let result: (counts: [String: Int], sampled: Bool, incomplete: Bool)
+        let result: (counts: [String: Int], sampled: Bool)
         do { result = try await Self.counts(for: dimension, repo: repo) }
         catch { throw CECDashboardIntentError.fetchFailed }
 
@@ -114,25 +135,18 @@ struct LeadBreakdownIntent: AppIntent {
         let spoken = LeadAnswers.breakdown(result.counts,
                                            singular: dimension.spokenSingular,
                                            plural: dimension.spokenPlural,
-                                           sampled: result.sampled,
-                                           incomplete: result.incomplete)
+                                           sampled: result.sampled)
         return .result(dialog: IntentDialog(stringLiteral: spoken))
     }
 
     private static func counts(
         for dim: LeadBreakdownDimension, repo: LeadsRepository
-    ) async throws -> (counts: [String: Int], sampled: Bool, incomplete: Bool) {
+    ) async throws -> (counts: [String: Int], sampled: Bool) {
         switch dim {
-        case .tier:
-            // A degraded/floored tier read must not be spoken as exact.
-            let r = await repo.tierCountsResult()
-            return (r.counts, false, !r.ok)
         case .source:
-            let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.leadSource }
-            return (r.counts, r.sampled, false)
+            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.leadSource }
         case .industry:
-            let r = try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
-            return (r.counts, r.sampled, false)
+            return try await LeadAnswers.breakdownCounts(repo: repo) { $0.industry }
         }
     }
 }

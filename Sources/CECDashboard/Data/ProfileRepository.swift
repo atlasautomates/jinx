@@ -1,10 +1,9 @@
 import Foundation
 
-/// The lead profile's 3-table read (mirrors the lead-profile skill's
-/// `lookup_profile.py`): `leads` is essential; `lead_enrichment` and
-/// `lead_interactions` fail open so a missing row/policy degrades to a
-/// partial dossier, never a blank sheet. Zero LLM calls — deterministic
-/// reads + pure compose.
+/// The lead profile's read path (7.2 remap): ONE essential read against
+/// `v_cec_lead_profile` (the lead + its generated row, pre-joined and
+/// jsonb-flattened by the view) plus a fail-open `v_cec_lead_interactions`
+/// read for the timeline. Zero LLM calls — deterministic reads + pure compose.
 struct ProfileRepository {
     let client: SupabaseClient
 
@@ -14,23 +13,27 @@ struct ProfileRepository {
         // ids ride into eq. filters — strip filter-syntax chars (house pattern).
         let id = Self.sanitized(ref.id)
         guard !id.isEmpty else { throw ProfileError.notFound }
-        async let lead = leadDetail(id: id)                       // essential
-        async let enrichment = enrichmentRow(leadId: id)          // fail-open
+        async let profile = profileRow(id: id)                    // essential
         async let interactions = interactionRows(leadId: id)     // fail-open
-        return Self.compose(lead: try await lead,
-                            enrichment: await enrichment,
-                            interactions: await interactions)
+        let (lead, enrichment, corrupt) = try await profile
+        return Self.compose(lead: lead, enrichment: enrichment,
+                            interactions: await interactions,
+                            enrichmentCorrupt: corrupt)
     }
 
     /// Pure packaging seam (SelfTest target): orders the timeline
     /// chronologically by PARSED date (raw ISO string compare breaks on mixed
     /// Z/+00:00 offsets — code review), extracts the LATEST inbound
     /// sentiment/intent, trims a cap+1 fetch to the NEWEST cap rows, and
-    /// marks `partial` when a supplementary read FAILED (vs. genuinely empty).
+    /// marks `partial` when the interactions read FAILED (vs. genuinely empty).
+    /// The enrichment half can no longer fail independently — it rides the
+    /// essential view read; nil means "no generated row yet", a fact not a
+    /// failure.
     static func compose(
         lead: LeadDetailRow,
-        enrichment: (row: LeadEnrichmentRow?, ok: Bool),
-        interactions: (rows: [LeadInteractionRow], ok: Bool)
+        enrichment: LeadEnrichmentRow?,
+        interactions: (rows: [LeadInteractionRow], ok: Bool),
+        enrichmentCorrupt: Bool = false
     ) -> ProfileInputs {
         var timeline = interactions.rows.sorted {
             (DateParse.iso($0.interactionAt) ?? .distantPast)
@@ -46,48 +49,58 @@ struct ProfileRepository {
         }
         return ProfileInputs(
             lead: lead,
-            enrichment: enrichment.row,
+            enrichment: enrichment,
             interactions: timeline,
             sentiment: lastInbound?.meta("sentiment"),
             intent: lastInbound?.meta("intent"),
-            partial: !enrichment.ok || !interactions.ok,
+            // A generated half that FAILED TO DECODE is partial — corruption
+            // must not render pixel-identically to "never enriched" (delta
+            // round 2; the sibling casualized_shape case already surfaces).
+            partial: !interactions.ok || enrichmentCorrupt,
             interactionsFailed: !interactions.ok,
+            enrichmentCorrupt: enrichmentCorrupt,
             interactionsTruncated: truncated)
     }
 
     // MARK: - Reads
 
-    private func leadDetail(id: String) async throws -> LeadDetailRow {
-        let data = try await client.get("leads", [
+    /// The whole dossier row. The view's LEFT JOIN returns exactly one row per
+    /// existing lead, so "no rows" is genuinely "no such lead". The lead half
+    /// and the generated half are two decodes of the SAME response body (each
+    /// Codable type reads only its own keys); an all-nil generated half
+    /// synthesizes nil so the Personalization card suppresses (7.2 item 12).
+    ///
+    /// The generated decode is `try?`, deliberately: `research` is a raw
+    /// `JSONValue` whose decoder throws past its depth guard, and the view
+    /// applies no `jsonb_typeof` guard to that column — one pathological
+    /// payload must degrade the ENRICHMENT half to nil, never take down the
+    /// contact facts and timeline with it (code review, 7.2).
+    private func profileRow(id: String) async throws
+        -> (LeadDetailRow, LeadEnrichmentRow?, corrupt: Bool) {
+        let data = try await client.get("v_cec_lead_profile", [
             URLQueryItem(name: "select",
                          value: "id,email,first_name,last_name,full_name,company_name,"
                              + "job_title,company_description,location,city,state,"
-                             + "phone,website,industry"),
+                             + "phone,website,industry,"
+                             + "casualized_first_name,casualized_company_name,"
+                             + "casualized_city_name,personalization_project,"
+                             + "personalization_detail,personalized_opener,"
+                             + "personalized_offer,research,casualized_shape"),
             URLQueryItem(name: "id", value: "eq.\(id)"),
             URLQueryItem(name: "limit", value: "1"),
         ])
-        guard let row = try JSONDecoder().decode([LeadDetailRow].self, from: data).first
+        guard let lead = try JSONDecoder().decode([LeadDetailRow].self, from: data).first
         else { throw ProfileError.notFound }
-        return row
-    }
-
-    private func enrichmentRow(leadId: String) async -> (row: LeadEnrichmentRow?, ok: Bool) {
         do {
-            let data = try await client.get("lead_enrichment", [
-                URLQueryItem(name: "select",
-                             value: "casualized_first_name,casualized_company_name,"
-                                 + "casualized_city_name,personalization_project,"
-                                 + "personalization_detail,personalized_opener,"
-                                 + "personalized_offer,enrichment_source,"
-                                 + "enrichment_status,lead_tier,web_research_json"),
-                URLQueryItem(name: "lead_id", value: "eq.\(leadId)"),
-                URLQueryItem(name: "limit", value: "1"),
-            ])
-            return (try JSONDecoder().decode([LeadEnrichmentRow].self, from: data).first, true)
+            let generated = try JSONDecoder().decode([LeadEnrichmentRow].self, from: data).first
+            return (lead, generated.flatMap { $0.isEmpty ? nil : $0 }, false)
         } catch {
-            NSLog("ProfileRepository: enrichment read failed (partial dossier): %@",
+            // Degrade the ENRICHMENT half only — but LOUDLY: log + `partial`,
+            // so a corrupt research payload is distinguishable from a lead
+            // that was never enriched (delta round 2).
+            NSLog("ProfileRepository: generated half failed to decode (dossier partial): %@",
                   error.localizedDescription)
-            return (nil, false)
+            return (lead, nil, true)
         }
     }
 
@@ -97,9 +110,9 @@ struct ProfileRepository {
             // (the sentiment badge reads the latest inbound), and the +1 probe
             // distinguishes exactly-cap from over-cap. compose re-sorts
             // ascending for display.
-            let data = try await client.get("lead_interactions", [
+            let data = try await client.get("v_cec_lead_interactions", [
                 URLQueryItem(name: "select",
-                             value: "interaction_type,direction,subject,summary,"
+                             value: "id,interaction_type,direction,subject,summary,"
                                  + "transcript,metadata,source,interaction_at"),
                 URLQueryItem(name: "lead_id", value: "eq.\(leadId)"),
                 URLQueryItem(name: "order", value: "interaction_at.desc"),
@@ -117,10 +130,24 @@ struct ProfileRepository {
         String(id.unicodeScalars.filter { !",()\"\\ ".unicodeScalars.contains($0) })
     }
 
-    /// `--check-supabase` probe: is `lead_interactions` anon-readable at all?
-    /// (RLS/shape check via the real select against a nil UUID; expect [].)
+    /// `--check-supabase` probe: is `v_cec_lead_interactions` reader-readable at
+    /// all? (Grant/shape check via the real select against a nil UUID; expect [].)
     func fetchProbe() async -> Bool {
         await interactionRows(leadId: "00000000-0000-0000-0000-000000000000").ok
+    }
+
+    /// `--check-supabase` probe for the dossier view itself: the real select
+    /// against a nil UUID must come back 2xx (an empty array), or the profile
+    /// sheet is broken for every lead.
+    func profileProbe() async -> Bool {
+        do {
+            _ = try await profileRow(id: "00000000-0000-0000-0000-000000000000")
+            return true
+        } catch is ProfileError {
+            return true    // 2xx, zero rows — the view read itself works
+        } catch {
+            return false
+        }
     }
 }
 

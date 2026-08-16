@@ -51,9 +51,6 @@ struct LeadProfileView: View {
             if let sentiment = profile?.sentiment {
                 Badge(text: sentiment, style: statusStyle(for: sentiment))
             }
-            if let tier = profile?.enrichment?.leadTier?.nilIfEmpty {
-                Badge(text: "tier \(tier)", style: .blue)
-            }
             Spacer()
             if model.isLoading { ProgressView().controlSize(.small) }
             // Pin under the FETCHED identity when available — the entry-point
@@ -117,16 +114,27 @@ struct LeadProfileView: View {
     private func sections(_ inputs: ProfileInputs) -> some View {
         VStack(alignment: .leading, spacing: Space.s4) {
             if inputs.partial {
-                Text("Partial dossier — an enrichment or conversation read failed; sections may be missing.")
+                // Compose from the FLAGS, not a first-match branch — when both
+                // halves fail, both causes are named (delta round 2).
+                let causes = [
+                    inputs.interactionsFailed
+                        ? "the conversation read failed (timeline may be missing)" : nil,
+                    inputs.enrichmentCorrupt
+                        ? "the enrichment data failed to decode (personalization may be missing)" : nil,
+                ].compactMap { $0 }.joined(separator: "; ")
+                Text("Partial dossier — \(causes).")
                     .font(.ui(12))
                     .foregroundStyle(StatusStyle.orange.fg)
             }
             factsSection(inputs.lead)
-            if let enrichment = inputs.enrichment {
+            // Card only when it has content: a research-only lead has an
+            // enrichment row but nothing this card renders (QA finding, 7.2).
+            if let enrichment = inputs.enrichment, enrichment.hasPersonalizationContent
+                || enrichment.casualizedCorrupt {
                 personalizationSection(enrichment)
             }
             conversationSection(inputs)
-            if let research = inputs.enrichment?.webResearchJson {
+            if let research = inputs.enrichment?.research {
                 researchSection(research)
             }
         }
@@ -180,7 +188,7 @@ struct LeadProfileView: View {
 
     private func researchSection(_ research: JSONValue) -> some View {
         profileCard("Research (raw)") {
-            DisclosureGroup("web_research_json") {
+            DisclosureGroup("research") {
                 Text(research.prettyPrinted)
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
@@ -236,6 +244,11 @@ struct LeadProfileView: View {
     /// the text STAYS selectable and the copy trigger moves to a glyph button
     /// beside the label — selection and click-to-copy coexist instead of
     /// competing for the same click.
+    ///
+    /// These two blocks are the sheet's ONE accent moment (design review, 7.2:
+    /// a fully achromatic view isn't disciplined, it's flat — and the copy
+    /// blocks are the reason the sheet exists). Accent at whisper strength:
+    /// tinted label + accent-bordered surface, nothing glowing.
     @ViewBuilder
     private func copyBlock(_ label: String, _ text: String?) -> some View {
         if let text = text.flatMap(ProfileFacts.blockValue) {
@@ -243,7 +256,7 @@ struct LeadProfileView: View {
                 HStack(spacing: Space.s2) {
                     Text(label)
                         .font(.ui(11, weight: .medium))
-                        .foregroundStyle(Palette.textMuted)
+                        .foregroundStyle(Palette.accent)
                     CopyableValue(value: text, label: label, style: .glyph,
                                   demo: demoState(for: label))
                     Spacer()
@@ -255,7 +268,9 @@ struct LeadProfileView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(Space.s2)
                     .background(RoundedRectangle(cornerRadius: Radius.md)
-                        .fill(Palette.bgElevated))
+                        .fill(Palette.accentBg))
+                    .overlay(RoundedRectangle(cornerRadius: Radius.md)
+                        .strokeBorder(Palette.accentBorder, lineWidth: 1))
             }
         }
     }

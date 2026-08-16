@@ -1,11 +1,18 @@
 # Lead Dashboard
 
-Native macOS (SwiftUI) dashboard for Supabase lead data — three tabs (Leads,
-Campaigns, Pipeline), each a deterministic fetch → compose → build over read-only
-anon queries. See `BUILD_PLAN.md` for history.
+Native macOS (SwiftUI) dashboard for Supabase lead data — ONE surface (Leads),
+a deterministic fetch → compose → derive over read-only queries against the
+`v_cec_*` reader-boundary views (four consumed: leads, sent_events,
+lead_interactions, lead_profile; the campaigns pair awaits the future Campaigns
+app). Credentials are TWO Keychain items — `supabase_api_key` (the
+`arcane_read_cec` reader JWT, rides the Authorization bearer; SELECT on exactly
+the v_cec_* views) and `supabase_anon_key` (the project anon key, rides the
+`apikey` gateway header). Seed both per install-mac.sh's CREDENTIAL ORDER note. See `BUILD_PLAN.md` for history.
 
-**Status:** live on Supabase; the M2 adaptive (Haiku) layout was removed in the
-P1 renovation (2026-07) in favor of fixed deterministic layouts on every tab.
+**Status:** live on Supabase. The Campaigns and Pipeline tabs were DEPRECATED and
+deleted 2026-08-16 (leads-domain-split 7.2, Adrian's ruling): Pipeline was unused,
+Campaigns held write access and may return as its own app. Their sources live in
+git history (`git log -- Sources/CECDashboard/Views/ABCampaigns`).
 
 ## Run
 
@@ -14,10 +21,7 @@ cd builds/lead-dashboard
 swift run                 # launches the app window
 ```
 
-Resize the window to see the responsive breakpoints (`lg` ≥1200, `md` ≥996, `sm`
-below) switch — the indicator pill in the toolbar shows the active one.
-
-Offline dev mode (no Keychain, no network — the Leads tab only):
+Offline dev mode (no Keychain, no network):
 
 ```sh
 swift run CECDashboard --fixture
@@ -34,7 +38,7 @@ through the `staticRender` substitute path.
 ```sh
 swift build
 ./.build/debug/CECDashboard --selftest         # pure seams + preview render checks
-./.build/debug/CECDashboard --check-supabase   # live reads incl. lane/reply probes
+./.build/debug/CECDashboard --check-supabase   # reader-boundary probes (every consumed view + credential expiry)
 ./.build/debug/CECDashboard --screenshot list  # registered preview stills
 ./xcode/icon/gen-icons.sh                      # regenerate the app icon
 ```
@@ -44,21 +48,20 @@ harness, not a drawing script — that keeps it on the same OKLCH tokens as the 
 instead of a forked set of hex values. Re-run `gen-icons.sh` after changing it or
 any colour token it reads.
 
-## What's here (M0)
+## What's here
 
 - `Theme/` — `ABTokens.swift` defines `enum DesignTokens`, the OKLCH channel tokens
-  the Leads tab and the app icon both read (teal identity hue 192, pink reply role
-  hue 350, near-black world). `DesignTokens.swift` defines the older `enum Palette`
-  (hex, pink accent) still used by the Campaigns/Pipeline widgets.
-  `Components.swift` (Card, Badge, SectionLabel, Sparkline).
-- `Models/` — the layout-spec + widget-data Codable contract (`claude -p`'s M2 target).
-- `Widgets/` — the four widget views (`kpi`, `chart`, `table`, `status-board`) + the
-  `WidgetWrapper` registry that dispatches on type.
-- `Grid/WidgetGrid.swift` — absolute `(x,y,w,h)` placement per breakpoint.
-- `Shell/` — toolbar + scrollable grid.
-- `Mock/MockData.swift` — hardcoded lead-themed layout + widget data.
-
-## Next (M1)
-
-Replace `MockData` with a Supabase read (read-only key in Keychain) → bind real leads
-into the same widget-data shapes. Schema verified against the live DB at M1.
+  the Leads surface and the app icon both read (teal identity hue 192, pink reply
+  role hue 350, near-black world). `DesignTokens.swift` defines the older `enum
+  Palette` (hex) still used by the profile sheet. `Components.swift` (Card, Badge,
+  SectionLabel, Sparkline).
+- `Models/` — `LeadRow` (the `v_cec_leads` decode incl. status axes), `LeadFilter`/
+  `LeadFacets`/`LeadSnapshot` (the one-derivation filter layer), `DashboardInputs`,
+  `ProfileRow` (the `v_cec_lead_profile` + interactions decodes).
+- `Data/` — `SupabaseClient` (thin GET-only PostgREST client), `LeadsRepository`
+  (keyset walks over `v_cec_leads` / `v_cec_sent_events` / `v_cec_lead_interactions`),
+  `ProfileRepository`, `ProfileFacts`, `Keychain`, `PinsStore`.
+- `Views/ABLeads/` — the re-skinned Leads surface (KPI hero, trends, breakdowns,
+  filter bar, search, list). `Views/LeadProfileView.swift` — the dossier sheet.
+- `App/` — view models, App Intents (Siri), `--query` CLI, `--selftest`,
+  `--check-supabase`, the preview harness.

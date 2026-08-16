@@ -24,7 +24,7 @@ targets:
         CFBundleName: CECDashboard
         CFBundleDisplayName: CEC Dashboard
         CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "2"
+        CFBundleVersion: "3"
         LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.business
         NSHumanReadableCopyright: "Atlas Automates"
@@ -32,7 +32,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.atlasautomates.cecdashboard
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "2"   # bump per install: LaunchServices needs a reason to prefer the new copy
+        CURRENT_PROJECT_VERSION: "3"   # bump per install: LaunchServices needs a reason to prefer the new copy
         SWIFT_VERSION: "5.0"                   # Swift 5 language mode (matches the SPM build)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Single self-contained executable — no split CECDashboard.debug.dylib (the

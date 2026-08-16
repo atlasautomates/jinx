@@ -1,8 +1,24 @@
 import SwiftUI
 import AppKit
 
+/// Dock-reopen fallback for the single `Window` scene: `WindowGroup` gave two
+/// ways back to a closed window (⌘N + Dock); `Window` removes ⌘N, and if the
+/// system's default reopen handling ever fails to restore the scene the app
+/// would be a running process with no recoverable UI (contention lens). This
+/// makes the reopen path explicit: surface the retained window if one exists.
+final class CECAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            sender.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
+        }
+        return true   // let SwiftUI's own scene restoration run too
+    }
+}
+
 @main
 struct CECDashboardApp: App {
+    @NSApplicationDelegateAdaptor(CECAppDelegate.self) private var appDelegate
     @FocusedValue(\.leadSearchFocus) private var leadSearchFocus
 
     init() {
@@ -27,29 +43,33 @@ struct CECDashboardApp: App {
         if CommandLine.arguments.contains("--check-supabase") {
             SupabaseCheck.run()
         }
-        if CommandLine.arguments.contains("--check-write-key") {
-            // Headless write-capability probe: reports configured/not (and
-            // whether the ACL admits us without a prompt) — NEVER the value.
-            // install-mac.sh uses it as the write-key acceptance step.
-            let present = SupabaseWriteClient.isConfigured
-            let readable = present && (SupabaseConfig.writeKey() != nil)
-            print(readable ? "write-key: configured"
-                  : present ? "write-key: PRESENT BUT UNREADABLE (ACL/prompt — re-grant with -T after delete)"
-                  : "write-key: not configured (revisions read-only)")
-            exit(readable || !present ? 0 : 1)
-        }
+        // --check-write-key retired with the staged-copy revision editor (7.2:
+        // the Campaigns tab and its write path are deprecated; the app is
+        // read-only against the v_cec_* views).
         if CommandLine.arguments.contains("--query") {
             LeadQuery.run()   // headless answer for automation / the Aris voice gate
         }
     }
 
     var body: some Scene {
-        WindowGroup {
+        // `Window`, not `WindowGroup`: the app is ONE surface since 7.2, and a
+        // ⌘N-spawned sibling would duplicate the poll loops, register a second
+        // pair of wake/activation observers, and fork the pins store into two
+        // in-memory copies racing one JSON file (last writer wins — silent pin
+        // loss). Single-instance is the enforced default, not a convention.
+        Window("CEC Dashboard", id: "main") {
             RootView()
                 .onAppear {
                     // Ensure the SPM executable launches as a normal foreground app.
                     NSApplication.shared.setActivationPolicy(.regular)
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    // No `ignoringOtherApps: true`: a headless App Intent
+                    // (openAppWhenRun = false) launching the app in the
+                    // background still creates this scene, and force-stealing
+                    // focus would foreground the dashboard over whatever the
+                    // user was doing mid-voice-query. A plain activate() is
+                    // honored for user-initiated launches and ignored for
+                    // background ones (contention lens).
+                    NSApplication.shared.activate()
                 }
         }
         .windowStyle(.hiddenTitleBar)   // merge titlebar into content; traffic lights auto-hide (TitlebarHover)

@@ -8,159 +8,21 @@ import Foundation
 @MainActor
 enum SelfTest {
     static func run() -> Never {
-        guard let dash = MockData.dashboard else {
-            FileHandle.standardError.write(Data("SELFTEST FAIL: mock dashboard failed to decode\n".utf8))
-            exit(1)
-        }
-
         var problems: [String] = []
 
-        // Every layout widget must have matching data and a rect per breakpoint.
-        let bps = Set(dash.layout.breakpoints.keys)
-        for widget in dash.layout.widgets {
-            if dash.widgets[widget.id] == nil {
-                problems.append("widget '\(widget.id)' has no data")
-            }
-            let missing = bps.subtracting(widget.layouts.keys)
-            if !missing.isEmpty {
-                problems.append("widget '\(widget.id)' missing layouts: \(missing.sorted())")
-            }
-        }
-
-        // All four widget kinds should be represented in the M0 sample.
-        let kinds = Set(dash.widgets.values.map { kindName($0) })
-        for expected in ["kpi", "chart", "table", "status-board"] where !kinds.contains(expected) {
-            problems.append("missing widget kind: \(expected)")
-        }
-
-        // Resilience: one malformed widget must be dropped, not blank the dashboard.
-        let layoutJSON = """
-        { "breakpoints": {"lg":1200}, "cols": {"lg":12}, "rowHeight": 80,
-          "widgets": [ {"id":"a","type":"kpi","layouts":{"lg":{"x":0,"y":0,"w":3,"h":2}}} ] }
-        """
-        let mixedWidgets = """
-        { "a": {"type":"kpi","title":"Good","value":10},
-          "b": {"type":"not-a-real-type","title":"Bad"} }
-        """
-        if let partial = Dashboard.decode(layoutJSON: layoutJSON, widgetsJSON: mixedWidgets) {
-            if partial.widgets["a"] == nil { problems.append("resilience: good widget 'a' was dropped") }
-            if partial.widgets["b"] != nil { problems.append("resilience: bad widget 'b' was not dropped") }
-        } else {
-            problems.append("resilience: one bad widget blanked the whole dashboard")
-        }
-
-        // Binding: DashboardBuilder turns lead rows into the widget contract.
+        // The compose/parse sample rows (v_cec_leads shape — 7.2 remap; the old
+        // widget-grid/DashboardBuilder/Packer suite left with the Pipeline tab).
         let sampleLeads: [LeadRow] = [
             LeadRow(id: "1", companyName: "Acme", firstName: "A", industry: "Auto",
-                    leadSource: "gmaps-leads", city: "Tampa", state: "FL", createdAt: "2026-06-10T12:00:00+00:00",
-                    enrichmentStage: "personalized"),
+                    leadSource: "gmaps-leads", city: "Tampa", state: "FL",
+                    createdAt: "2026-06-10T12:00:00+00:00",
+                    personalized: true, hasResearch: true),
             LeadRow(id: "2", companyName: "Globex", firstName: "B", industry: "Biotech",
-                    leadSource: "sales-nav", city: "Austin", state: "TX", createdAt: "2026-06-12T12:00:00.500+00:00",
-                    enrichmentStage: "scraped"),
+                    leadSource: "sales-nav", city: "Austin", state: "TX",
+                    createdAt: "2026-06-12T12:00:00.500+00:00"),
             LeadRow(id: "3", companyName: "Initech", firstName: "C", industry: "Tech",
                     leadSource: "gmaps-leads", city: nil, state: nil, createdAt: nil),
         ]
-        let built = DashboardBuilder.build(DashboardInputs(leads: sampleLeads, totalCount: 720))
-        // Deterministic plan: tier/sentiment boards are skipped when their
-        // supplementary counts are empty (empty board = noise); recent-leads is
-        // the native list below the grid now (P3), not a widget; total-leads is
-        // the toolbar subtitle now (i-9f08), not a KPI widget.
-        if Set(built.layout.widgets.map { $0.id })
-            != ["by-source", "by-industry", "by-status", "added-weekly"] {
-            problems.append("builder: unexpected widget ids (\(built.layout.widgets.map { $0.id }.sorted()))")
-        }
-        problems.append(contentsOf: validateGrid(built.layout, label: "leads-build"))
-        // by-status buckets enrichment_stage capitalized, nil → "Unknown", counts sum to the window.
-        if case .statusBoard(let board)? = built.widgets["by-status"] {
-            let labels = Set(board.groups.map { $0.label })
-            if labels != ["Personalized", "Scraped", "Unknown"] {
-                problems.append("builder: by-status labels unexpected (\(labels.sorted()))")
-            }
-            if board.groups.reduce(0, { $0 + $1.count }) != sampleLeads.count {
-                problems.append("builder: by-status counts != lead count")
-            }
-        } else {
-            problems.append("builder: by-status is not a status board")
-        }
-        if case .statusBoard(let board)? = built.widgets["by-source"] {
-            let summed = board.groups.reduce(0) { $0 + $1.count }
-            if summed != sampleLeads.count { problems.append("builder: source counts (\(summed)) != lead count") }
-        } else {
-            problems.append("builder: by-source is not a status board")
-        }
-        // The row with nil createdAt must not crash the weekly chart; ≤2 weeks present.
-        if case .chart(let chart)? = built.widgets["added-weekly"], chart.points.count > 8 {
-            problems.append("builder: chart exceeded 8 buckets")
-        }
-
-        // Zero-fill: leads 3 weeks apart must produce 4 contiguous weekly points (gaps = 0),
-        // not 2 collapsed points.
-        let gapLeads: [LeadRow] = [
-            LeadRow(id: "g1", companyName: "X", firstName: nil, industry: nil,
-                    leadSource: "a", city: nil, state: nil, createdAt: "2026-05-04T00:00:00+00:00"),
-            LeadRow(id: "g2", companyName: "Y", firstName: nil, industry: nil,
-                    leadSource: "a", city: nil, state: nil, createdAt: "2026-05-25T00:00:00+00:00"),
-        ]
-        let gapBuilt = DashboardBuilder.build(DashboardInputs(leads: gapLeads, totalCount: 2))
-        if case .chart(let chart)? = gapBuilt.widgets["added-weekly"] {
-            let zeros = chart.points.filter { $0.y == 0 }.count
-            if chart.points.count != 4 || zeros != 2 {
-                problems.append("builder: zero-fill expected 4 points/2 zeros, got \(chart.points.count) points/\(zeros) zeros")
-            }
-        } else {
-            problems.append("builder: gap chart is not a chart")
-        }
-
-        // Packer: any plan must expand to a grid with NO overlaps and every
-        // rect in-bounds, at every breakpoint — the "can't make a broken grid" guarantee.
-        let plan = LayoutPlan(widgets: [
-            PlannedWidget(type: .kpi, bind: "total-leads", size: .small, priority: 1),
-            PlannedWidget(type: .kpi, bind: "enriched", size: .small, priority: 2),
-            PlannedWidget(type: .statusBoard, bind: "by-source", size: .medium, priority: 3),
-            PlannedWidget(type: .chart, bind: "added-weekly", size: .large, priority: 4),
-            PlannedWidget(type: .table, bind: "recent-leads", size: .full, priority: 5),
-            PlannedWidget(type: .kpi, bind: "total-leads", size: .large, priority: 6), // dup bind
-        ])
-        let packed = Packer.pack(plan)
-        problems.append(contentsOf: validateGrid(packed, label: "packer"))
-        if packed.widgets.count != 5 {
-            problems.append("packer: expected 5 widgets after dedupe, got \(packed.widgets.count)")
-        }
-        // A full-width widget must occupy its own row width at lg (span == cols).
-        if let table = packed.widgets.first(where: { $0.id == "recent-leads" }),
-           let r = table.layouts["lg"], r.w != 12 {
-            problems.append("packer: full-size widget should span all 12 lg cols, got \(r.w)")
-        }
-
-        // availableBinds must match exactly what widgetData produces (drift guard).
-        let dataKeys = Set(DashboardBuilder.widgetData(DashboardInputs(leads: sampleLeads, totalCount: 720)).keys)
-        if dataKeys != DashboardBuilder.availableBinds {
-            problems.append("builder: availableBinds \(DashboardBuilder.availableBinds) != widgetData keys \(dataKeys)")
-        }
-
-        // M3b: tier/sentiment boards from supplementary counts (DashboardInputs).
-        let m3bInputs = DashboardInputs(
-            leads: sampleLeads, totalCount: 720,
-            tierCounts: ["A": 50, "B": 30, "C": 20],
-            sentimentCounts: ["positive": 12, "neutral": 5, "negative": 3]
-        )
-        let m3bData = DashboardBuilder.widgetData(m3bInputs)
-        if case .statusBoard(let tier)? = m3bData["by-tier"] {
-            if tier.groups.reduce(0, { $0 + $1.count }) != 100 { problems.append("m3b: tier counts != 100") }
-        } else { problems.append("m3b: by-tier is not a status board") }
-        if case .statusBoard(let sent)? = m3bData["sentiment-mix"] {
-            if sent.groups.first?.label != "positive" { problems.append("m3b: sentiment not sorted (top should be positive)") }
-        } else { problems.append("m3b: sentiment-mix is not a status board") }
-        // Empty supplementary tables → empty board data AND the plan skips them.
-        let emptyInputs = DashboardInputs(leads: sampleLeads, totalCount: 720)
-        if case .statusBoard(let tier)? = DashboardBuilder.widgetData(emptyInputs)["by-tier"],
-           !tier.groups.isEmpty { problems.append("m3b: empty tierCounts should yield an empty board") }
-        let m3bBuilt = DashboardBuilder.build(m3bInputs)
-        if !m3bBuilt.layout.widgets.contains(where: { $0.id == "by-tier" })
-            || !m3bBuilt.layout.widgets.contains(where: { $0.id == "sentiment-mix" }) {
-            problems.append("m3b: present tier/sentiment counts should be planned")
-        }
-        problems.append(contentsOf: validateGrid(m3bBuilt.layout, label: "leads-build-m3b"))
 
         // ── Leads tab: LeadsRepository.compose (P1 renovation seam) ────────────────
         problems.append(contentsOf: leadsComposeChecks(sampleLeads: sampleLeads))
@@ -190,21 +52,12 @@ enum SelfTest {
         // ── Pinned leads: PinsStore (P5) ────────────────────────────────────────────
         problems.append(contentsOf: pinsChecks())
 
-        // ── Healing backlog: BacklogRepository.compose (P6) ─────────────────────────
-        problems.append(contentsOf: backlogComposeChecks())
-
-        // ── Campaigns tab: CampaignsRepository compose seams + drill mappings ───────
-        // The compose path is pure (no I/O), so we exercise the join/binding edge cases
-        // here rather than against the live DB.
-        problems.append(contentsOf: campaignChecks())
-
-        // ── Pipeline tab: PipelineRepository.compose + PipelineBuilder ──────────────
-        problems.append(contentsOf: pipelineChecks())
+        // (Backlog/Campaigns/Pipeline check families left with their tabs — 7.2.)
 
         // ── Leads tab: live DashboardInputs → ABLeadsData mapping (pure/total) ──────
         problems.append(contentsOf: abLeadsMappingChecks())
 
-        let summary = "widgets=\(dash.layout.widgets.count) data=\(dash.widgets.count) kinds=\(kinds.sorted())"
+        let summary = "leads-surface remap (v_cec_* views)"
         if problems.isEmpty {
             print("SELFTEST PASS — \(summary)")
             exit(0)
@@ -217,15 +70,17 @@ enum SelfTest {
     /// Fixed clock so every now-anchored 12-week window below is deterministic.
     private static let abNow = DateParse.iso("2026-07-24T12:00:00+00:00") ?? Date()
 
-    /// The two-lead sample the mapping checks share.
+    /// The two-lead sample the mapping checks share. "a" carries campaign-ready
+    /// copy and a dossier (view booleans); "b" is a bare scrape.
     private static var abSampleLeads: [LeadRow] {
         [
             LeadRow(id: "a", companyName: "Acme", firstName: "Ada", industry: "Auto",
                     leadSource: "sales-nav", city: "Tampa", state: "FL",
-                    createdAt: "2026-07-01T12:00:00+00:00", enrichmentStage: "campaigned"),
+                    createdAt: "2026-07-01T12:00:00+00:00",
+                    personalized: true, hasResearch: true),
             LeadRow(id: "b", companyName: nil, firstName: nil, industry: nil,
                     leadSource: nil, city: nil, state: nil,
-                    createdAt: "2026-07-08T12:00:00+00:00", enrichmentStage: "scraped"),
+                    createdAt: "2026-07-08T12:00:00+00:00"),
         ]
     }
 
@@ -249,19 +104,20 @@ enum SelfTest {
         // counted off them (and therefore moves with the filter).
         let inputs = DashboardInputs(
             leads: leads, totalCount: 2, leadsComplete: true,
-            personalizedLeadIDs: ["a"], repliedLeadIDs: ["a", "ghost"],
+            repliedLeadIDs: ["a", "ghost"],
             messagedSends: sends)
         let d = ABLeadsData(inputs: inputs, now: now)
 
         if d.totals.scraped != 2 { problems.append("abmap: scraped must count the matching leads (got \(d.totals.scraped))") }
-        if d.totals.emailed != 1 { problems.append("abmap: emailed must count campaigned leads (got \(d.totals.emailed))") }
+        // Emailed = DISTINCT leads in the sent-event log (both a and b were sent to).
+        if d.totals.emailed != 2 { problems.append("abmap: emailed must count leads with a send on record (got \(d.totals.emailed))") }
         // "ghost" replied but is not in the lead book — the ratio is replied LEADS
         // over emailed LEADS, so a reply with no matching lead cannot inflate it.
         if d.totals.replies != 1 {
             problems.append("abmap: replies must intersect the shown leads, not count reply rows (got \(d.totals.replies))")
         }
-        if abs(d.emailedOfScrapedPct - 50.0) > 0.001 { problems.append("abmap: emailedOfScrapedPct math (got \(d.emailedOfScrapedPct))") }
-        if abs(d.repliesOfEmailedPct - 100.0) > 0.001 { problems.append("abmap: repliesOfEmailedPct math (got \(d.repliesOfEmailedPct))") }
+        if abs(d.emailedOfScrapedPct - 100.0) > 0.001 { problems.append("abmap: emailedOfScrapedPct math (got \(d.emailedOfScrapedPct))") }
+        if abs(d.repliesOfEmailedPct - 50.0) > 0.001 { problems.append("abmap: repliesOfEmailedPct math (got \(d.repliesOfEmailedPct))") }
         if d.recentLeads.first?.leadID != "a" { problems.append("abmap: recent lead must carry the DB id for profile-open") }
         if d.recentLeads.count != 2 { problems.append("abmap: recentLeads count (got \(d.recentLeads.count))") }
         if d.recentLeads.last?.company != "Unknown" { problems.append("abmap: nil company_name must render as Unknown") }
@@ -282,15 +138,104 @@ enum SelfTest {
         if d.leadsAddedWeekly.weeks.count != d.leadsAddedWeekly.values.count { problems.append("abmap: added-weekly weeks/values length mismatch") }
         // A complete snapshot presents no window, so it carries no scope note.
         if d.breakdownScopeNote != nil { problems.append("abmap: a complete snapshot must not claim a window (got \(d.breakdownScopeNote ?? "nil"))") }
-        // The status panel counts the snapshot, so it moves with the filter.
-        if d.byStatus.map(\.label).sorted() != ["Campaigned", "Scraped"] {
-            problems.append("abmap: byStatus must roll up the shown leads (got \(d.byStatus.map(\.label)))")
+        // The status panel is a FUNNEL in stage order, counted off the snapshot so
+        // it moves with the filter: Scraped=all, Researched/Personalized=the view
+        // booleans, Campaigned=the sent-event set.
+        if d.byStatus.map(\.label) != ["Scraped", "Researched", "Personalized", "Campaigned"] {
+            problems.append("abmap: byStatus must be the stage funnel in order (got \(d.byStatus.map(\.label)))")
+        }
+        if d.byStatus.map(\.count) != [2, 1, 1, 2] {
+            problems.append("abmap: funnel counts must derive from the view booleans + sent set (got \(d.byStatus.map(\.count)))")
+        }
+        // Funnel rows carry their retention SHARE of the Scraped denominator —
+        // the overlap cue (design review): 2/2, 1/2, 1/2, 2/2.
+        if d.byStatus.compactMap(\.share).map({ Int($0.rounded()) }) != [100, 50, 50, 100] {
+            problems.append("abmap: funnel shares must be percent-of-scraped (got \(d.byStatus.map(\.share)))")
+        }
+        // ROW-LABEL derivation (LeadFacets.stage) — pinned DIRECTLY, not via the
+        // funnel: the two are separate implementations, and deleting the
+        // emailed branch left the suite green while every row mislabelled
+        // (code review). Lead "a" replied → the reward outcome outranks
+        // Campaigned; lead "b" was sent to but never replied.
+        if d.recentLeads.first(where: { $0.leadID == "a" })?.status != "Replied" {
+            problems.append("abmap: a replied lead's row must read Replied (got "
+                + "\(d.recentLeads.first(where: { $0.leadID == "a" })?.status ?? "nil"))")
+        }
+        if d.recentLeads.first(where: { $0.leadID == "b" })?.status != "Campaigned" {
+            problems.append("abmap: an emailed lead's row must read Campaigned (got "
+                + "\(d.recentLeads.first(where: { $0.leadID == "b" })?.status ?? "nil"))")
+        }
+        // The full ladder, one rung at a time (kills single-branch deletions).
+        let ladder = LeadRow(id: "l", companyName: nil, firstName: nil, industry: nil,
+                             leadSource: nil, city: nil, state: nil, createdAt: nil,
+                             personalized: true, hasResearch: true)
+        if LeadFacets.stage(lead: ladder, emailed: false) != "Personalized"
+            || LeadFacets.stage(lead: ladder, emailed: true) != "Campaigned"
+            || LeadFacets.stage(lead: ladder, emailed: true, replied: true) != "Replied" {
+            problems.append("abmap: the furthest-stage ladder broke")
+        }
+        var research = ladder; research.personalized = false
+        if LeadFacets.stage(lead: research, emailed: false) != "Researched" {
+            problems.append("abmap: hasResearch alone must read Researched")
+        }
+        research.hasResearch = false
+        if LeadFacets.stage(lead: research, emailed: false) != "Scraped" {
+            problems.append("abmap: a bare row must read Scraped")
+        }
+        // DEGRADED sent-events: the emailed test falls back to the outreach
+        // axis (built through compose, so the degradation flags are the real
+        // ones) — an empty event set is a FAILURE, and deriving stages from it
+        // relabelled every campaigned lead "Personalized" (swift-semantics).
+        var axisLead = ladder; axisLead.outreach = "sequence_done"
+        let degradedSnap = LeadSnapshot(LeadsRepository.compose(
+            leads: [axisLead], totalCount: 1, leadsComplete: true,
+            messaged: ([], ok: false)))
+        if degradedSnap.facets.first?.stage != "Campaigned" {
+            problems.append("abmap: under a failed sent-events read the stage must fall "
+                + "back to the outreach axis (got \(degradedSnap.facets.first?.stage ?? "nil"))")
+        }
+        // …and a CLEAN empty event log must NOT consult the axis: an unemailed
+        // book really is unemailed (the fallback fires only on failure).
+        let cleanSnap = LeadSnapshot(LeadsRepository.compose(
+            leads: [axisLead], totalCount: 1, leadsComplete: true,
+            messaged: ([], ok: true)))
+        if cleanSnap.facets.first?.stage != "Personalized" {
+            problems.append("abmap: a clean empty event log must not fall back to the axis "
+                + "(got \(cleanSnap.facets.first?.stage ?? "nil"))")
+        }
+        // BOTH fallback layers, pinned against the artifact only IT produces
+        // (delta round 1: the ABLeadsData half was deletable under a green
+        // suite — on a failed sent-events read the emailed KPI, the funnel's
+        // Campaigned row and the reply count would collapse to 0 while the
+        // row labels correctly read Campaigned, an on-screen contradiction).
+        let degradedData = ABLeadsData(inputs: LeadsRepository.compose(
+            leads: [axisLead], totalCount: 1, leadsComplete: true,
+            replied: (["l"], ok: true), messaged: ([], ok: false)), now: now)
+        if degradedData.totals.emailed != 1 {
+            problems.append("abmap: the emailed KPI must fall back to the axis under a "
+                + "failed sent-events read (got \(degradedData.totals.emailed))")
+        }
+        if degradedData.byStatus.last?.count != 1 {
+            problems.append("abmap: the funnel's Campaigned row must fall back to the axis "
+                + "(got \(degradedData.byStatus.last?.count ?? -1))")
+        }
+        if degradedData.totals.replies != 1 {
+            problems.append("abmap: the reply count must intersect the FALLBACK emailed set "
+                + "(got \(degradedData.totals.replies))")
+        }
+        // status_row_missing rows are COUNTED into the disclosure.
+        var orphan = ladder; orphan.statusRowMissing = true
+        let orphanData = ABLeadsData(inputs: DashboardInputs(
+            leads: [orphan], totalCount: 1, leadsComplete: true), now: now)
+        if orphanData.statusRowsMissing != 1 {
+            problems.append("abmap: statusRowMissing rows must surface in the count "
+                + "(got \(orphanData.statusRowsMissing))")
         }
         // F4: an out-of-window outlier timestamp must not shift/blank the axis.
         let outlier = ABLeadsData(inputs: DashboardInputs(
             leads: [LeadRow(id: "x", companyName: "Old", firstName: nil, industry: nil,
                             leadSource: nil, city: nil, state: nil,
-                            createdAt: "2001-01-01T00:00:00+00:00", enrichmentStage: "scraped")],
+                            createdAt: "2001-01-01T00:00:00+00:00")],
             totalCount: 1, leadsComplete: true), now: now)
         if outlier.leadsAddedWeekly.weeks.count != 12 || outlier.leadsAddedWeekly.values.reduce(0, +) != 0 {
             problems.append("abmap: out-of-window timestamp must yield a zero-filled 12-week axis, not shift it")
@@ -306,7 +251,9 @@ enum SelfTest {
         }
         if empty.leadsAddedWeekly.values.reduce(0, +) != 0 { problems.append("abmap: empty leads → zero added series") }
         if !empty.recentLeads.isEmpty { problems.append("abmap: empty leads → empty recent list") }
-        if !empty.bySource.isEmpty || !empty.byStatus.isEmpty { problems.append("abmap: empty leads → empty breakdowns") }
+        if !empty.bySource.isEmpty { problems.append("abmap: empty leads → empty breakdowns") }
+        // The funnel keeps its shape on an empty book — four stages, all zero.
+        if empty.byStatus.map(\.count) != [0, 0, 0, 0] { problems.append("abmap: empty leads → zero funnel") }
         if empty.breakdownScopeNote != nil { problems.append("abmap: complete/empty data → no scope note") }
 
         // WINDOWED snapshot: ONE population, always. There is no "keep the exact
@@ -317,10 +264,9 @@ enum SelfTest {
         // every headline figure must be counted over the SAME rows.
         let windowedInputs = DashboardInputs(
             leads: leads, totalCount: 200, leadsComplete: false,
-            statusCounts: ["campaigned": 80, "scraped": 120],   // present and IGNORED
             repliedLeadIDs: ["a", "z"], messagedSends: sends)
         let windowed = ABLeadsData(inputs: windowedInputs, now: now)
-        if windowed.totals.scraped != 2 || windowed.totals.emailed != 1 || windowed.totals.replies != 1 {
+        if windowed.totals.scraped != 2 || windowed.totals.emailed != 2 || windowed.totals.replies != 1 {
             problems.append("abmap: a windowed load must count the WINDOW, never mix in full-table "
                 + "figures (got \(windowed.totals.scraped)/\(windowed.totals.emailed)/\(windowed.totals.replies))")
         }
@@ -342,17 +288,18 @@ enum SelfTest {
             problems.append("abmap: a filtered windowed load must still disclose the window")
         }
         // The reply rate cannot exceed 100%: replies are intersected with the
-        // CAMPAIGNED matching leads, so the numerator is a subset of the denominator
-        // even when a lead replied while still at an earlier stage (a data-integrity
-        // problem upstream that used to render as 200%).
+        // EMAILED matching leads, so the numerator is a subset of the denominator
+        // even when a lead has an inbound row but no send on record (a
+        // data-integrity problem upstream that used to render as 200%).
         let earlyReply = ABLeadsData(inputs: DashboardInputs(
             leads: [LeadRow(id: "p", companyName: "P", firstName: nil, industry: nil,
                             leadSource: nil, city: nil, state: nil,
-                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "campaigned"),
+                            createdAt: "2026-07-20T12:00:00+00:00", personalized: true),
                     LeadRow(id: "q", companyName: "Q", firstName: nil, industry: nil,
                             leadSource: nil, city: nil, state: nil,
-                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "personalized")],
-            totalCount: 2, leadsComplete: true, repliedLeadIDs: ["p", "q"]), now: now)
+                            createdAt: "2026-07-20T12:00:00+00:00", personalized: true)],
+            totalCount: 2, leadsComplete: true, repliedLeadIDs: ["p", "q"],
+            messagedSends: [.init(leadID: "p", sentAt: "2026-07-21T09:00:00+00:00")]), now: now)
         if earlyReply.repliesOfEmailedPct > 100.0 {
             problems.append("abmap: the reply rate must not exceed 100% — replies are counted over the "
                 + "leads that were actually emailed (got \(earlyReply.repliesOfEmailedPct)%)")
@@ -407,14 +354,14 @@ enum SelfTest {
         let inputs = LeadsFixtureSource.inputs(now: abNow)
 
         let failing = DashboardViewModel(fetcher: { throw StubError() })
-        _ = runMain { await failing.load() }
+        if runMain({ await failing.load() }) == nil { problems.append("vm: failing.load() timed out") }
         if failing.loadedAt != nil {
             problems.append("vm: a FAILED load must not stamp loadedAt")
         }
         if failing.state.value != nil { problems.append("vm: a failed first load has no data") }
 
         let ok = DashboardViewModel(fetcher: { inputs })
-        _ = runMain { await ok.load() }
+        if runMain({ await ok.load() }) == nil { problems.append("vm: ok.load() timed out") }
         guard let liveStamp = ok.loadedAt else {
             problems.append("vm: a successful live load must stamp loadedAt")
             return problems
@@ -424,10 +371,10 @@ enum SelfTest {
         // fetch succeeds once and fails after:
         let flakyBox = FlakyFetcher(inputs: inputs)
         let flaky = DashboardViewModel(fetcher: { try flakyBox.next() })
-        _ = runMain { await flaky.load() }
+        if runMain({ await flaky.load() }) == nil { problems.append("vm: flaky.load() timed out") }
         let firstLive = flaky.loadedAt
         flakyBox.failFromNowOn()
-        _ = runMain { await flaky.load() }
+        if runMain({ await flaky.load() }) == nil { problems.append("vm: flaky reload timed out") }
         if flaky.loadedAt != firstLive {
             problems.append("vm: a FAILED refresh must not advance the stamp over unchanged data")
         }
@@ -438,7 +385,7 @@ enum SelfTest {
 
         // Cancellation is not a failure: no stale banner, no stamp, no error state.
         let cancelled = DashboardViewModel(fetcher: { throw CancellationError() })
-        _ = runMain { await cancelled.load() }
+        if runMain({ await cancelled.load() }) == nil { problems.append("vm: cancelled.load() timed out") }
         if cancelled.loadedAt != nil { problems.append("vm: a cancelled load must not stamp") }
         if case .failed = cancelled.state {
             problems.append("vm: a cancelled load must not paint an error — that reports teardown as a fault")
@@ -483,7 +430,25 @@ enum SelfTest {
                     leadSource: "sales-nav", city: nil, state: "FL",
                     createdAt: "2026-07-19T00:00:00+00:00"),
         ]
-        let resolve: (LeadRow) -> LeadFacets = { LeadFacets(lead: $0, deepLane: false, personalized: false) }
+        // The resolver is EMAILED-AWARE — hardcoding `emailed: false` made every
+        // branch identical on exactly the dimension the 7.2 remap changed, and
+        // the regression it hid (search hits understating their stage in the
+        // DEFAULT no-filter state) sailed through (QA review). "tx" is treated
+        // as sent-to; "fl" is not.
+        let resolve: (LeadRow) -> LeadFacets = {
+            LeadFacets(lead: $0, emailed: $0.id == "tx")
+        }
+        // NO-FILTER state: facets must still resolve (the status chip needs
+        // them), and nothing is hidden.
+        if case .results(_, let unfiltered, let hid) = LeadSearchModel.narrow(
+            term: "acme", rows: bookRows, scope: .all, facets: resolve, ignoring: false) {
+            if hid != 0 { problems.append("search-scope: inactive scope must hide nothing") }
+            if unfiltered.first(where: { $0.leadID == "tx" })?.status != "Campaigned" {
+                problems.append("search-scope: an unfiltered search hit must carry its REAL "
+                    + "stage (got \(unfiltered.first(where: { $0.leadID == "tx" })?.status ?? "nil")) "
+                    + "— skipping facet resolution understates every campaigned hit")
+            }
+        } else { problems.append("search-scope: unfiltered narrow returned no results") }
         let scoped = LeadSearchModel.narrow(term: "acme", rows: bookRows,
                                             scope: LeadFilter(region: "Texas"),
                                             facets: resolve, ignoring: false)
@@ -531,7 +496,8 @@ enum SelfTest {
 
         @Sendable func client(_ handler: @escaping @Sendable (URLRequest) -> StubURLProtocol.Response?) -> SupabaseClient {
             SupabaseClient(baseURL: URL(string: "https://stub.invalid/rest/v1")!,
-                           apiKey: "stub", session: StubURLProtocol.session(handler))
+                           anonKey: "stub-anon", bearerKey: "stub-bearer",
+                           session: StubURLProtocol.session(handler))
         }
 
         /// Two pages then an empty one — the shape every walk expects.
@@ -594,16 +560,16 @@ enum SelfTest {
         let badRepo = LeadsRepository(client: client({ _ in .init(body: "not json") }))
         let sends = runAsyncValue { await badRepo.messagedSendsResult(pageSize: 2, maxPages: 3) }
         if sends?.ok != false {
-            problems.append("walk: an unparseable send_queue page must report ok:false")
+            problems.append("walk: an unparseable sent-events page must report ok:false")
         }
-        let ids = runAsyncValue { await badRepo.leadIDsResult(table: "replies", filter: nil,
+        let ids = runAsyncValue { await badRepo.leadIDsResult(table: "v_cec_lead_interactions", filters: [],
                                                               pageSize: 2, maxPages: 3) }
         if ids?.ok != false {
             problems.append("walk: an unparseable lead_id page must report ok:false")
         }
         // An HTTP error is also a degraded read, not an empty one.
         let errRepo = LeadsRepository(client: client({ _ in .init(status: 401, body: "{}") }))
-        let errIDs = runAsyncValue { await errRepo.leadIDsResult(table: "replies", filter: nil) }
+        let errIDs = runAsyncValue { await errRepo.leadIDsResult(table: "v_cec_lead_interactions", filters: []) }
         if errIDs?.ok != false || errIDs?.ids.isEmpty != true {
             problems.append("walk: a 401 must degrade, not return a confident empty set")
         }
@@ -613,12 +579,12 @@ enum SelfTest {
         // one" tell: the cap means the set is a FLOOR, so it must report ok:false.
         let endless = LeadsRepository(client: client({ req in
             let table = req.url?.path.split(separator: "/").last ?? ""
-            if table == "send_queue" {
+            if table == "v_cec_sent_events" {
                 return .init(body: #"[{"id":"\#(UUID().uuidString)","lead_id":"L","sent_at":"2026-07-20T00:00:00+00:00"}]"#)
             }
             return .init(body: #"[{"id":"\#(UUID().uuidString)","lead_id":"L"}]"#)
         }))
-        if runAsyncValue({ await endless.leadIDsResult(table: "replies", filter: nil,
+        if runAsyncValue({ await endless.leadIDsResult(table: "v_cec_lead_interactions", filters: [],
                                                        pageSize: 1, maxPages: 2) })?.ok != false {
             problems.append("walk: leadIDsResult hitting the page cap must report ok:false (a floor, not the truth)")
         }
@@ -628,44 +594,96 @@ enum SelfTest {
         // A non-empty page with NO usable cursor cannot be walked past — degrade
         // rather than silently return a prefix.
         let noCursor = LeadsRepository(client: client({ _ in .init(body: #"[{"lead_id":"L"}]"#) }))
-        if runAsyncValue({ await noCursor.leadIDsResult(table: "replies", filter: nil,
+        if runAsyncValue({ await noCursor.leadIDsResult(table: "v_cec_lead_interactions", filters: [],
                                                         pageSize: 2, maxPages: 3) })?.ok != false {
             problems.append("walk: a page with no cursor must report ok:false, not a silent prefix")
         }
 
-        // `columnCounts` — the LAST offset pager, converted this round and skipped by
-        // the walk tests. Its failure mode is wrong NUMBERS: without a cursor every
-        // page re-reads page 1 and the tally multiplies by the page cap. It feeds the
-        // `--query` / App Intents voice answers.
-        // The stub answers by CURSOR, not by a call counter. Keying on a counter
-        // makes this test blind to the exact defect it is here for: a walk that
-        // never advances its cursor re-requests page 1 forever, and a counter-keyed
-        // stub hands it page 2 anyway. (Caught by mutation — this assertion passed
-        // against a broken walk until the stub was rewritten.)
-        let tierRepo = LeadsRepository(client: client({ req in
-            let cursor = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?
-                .queryItems?.first { $0.name == "id" }?.value
-            switch cursor {
-            case nil:      return .init(body: #"[{"id":"1","lead_tier":"A"},{"id":"2","lead_tier":"B"}]"#)
-            case "gt.2":   return .init(body: #"[{"id":"3","lead_tier":"A"}]"#)
-            default:       return .init(body: "[]")
+        // fetch() must send BOTH replied-set predicates over the wire. Pinned
+        // BEHAVIOURALLY at the request layer — deleting interaction_type from
+        // `repliedFilters` left the whole suite green while a Cal booking or
+        // magnet view counted as a reply (delta round 1, mutation-proven).
+        let routed = LeadsRepository(client: client({ req in
+            let table = req.url?.path.split(separator: "/").last ?? ""
+            if req.value(forHTTPHeaderField: "Prefer") == "count=exact" {
+                return .init(body: "[]", contentRange: "0-0/1")
+            }
+            switch table {
+            case "v_cec_leads":
+                let cursor = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)?
+                    .queryItems?.contains { $0.name == "id" } ?? false
+                return .init(body: cursor ? "[]" : "[" + Self.leadJSON("f1") + "]")
+            default:
+                return .init(body: "[]")
             }
         }))
-        let tiers = runAsyncValue { await tierRepo.tierCountsResult() }
-        if tiers?.counts != ["A": 2, "B": 1] {
-            problems.append("walk: columnCounts must tally ACROSS pages exactly once "
-                + "(got \(tiers?.counts.description ?? "nil")) — a missing cursor advance "
-                + "multiplies every count by the page cap")
+        switch runAsync({ try await routed.fetch() }) {
+        case .failure(let error):
+            problems.append("walk: routed fetch() threw (\(error))")
+        case .success:
+            let interactionReqs = StubURLProtocol.requests.compactMap { req -> URLComponents? in
+                guard let url = req.url, url.path.hasSuffix("v_cec_lead_interactions") else { return nil }
+                return URLComponents(url: url, resolvingAgainstBaseURL: false)
+            }
+            if interactionReqs.isEmpty {
+                problems.append("walk: fetch() never queried v_cec_lead_interactions")
+            }
+            for comps in interactionReqs {
+                let items = comps.queryItems ?? []
+                if !items.contains(where: { $0.name == "direction" && $0.value == "eq.inbound" })
+                    || !items.contains(where: { $0.name == "interaction_type" && $0.value == "eq.email" }) {
+                    problems.append("walk: the replied-set request must carry BOTH "
+                        + "direction=eq.inbound AND interaction_type=eq.email — a Cal "
+                        + "booking or magnet view is not a reply (got \(comps.query ?? ""))")
+                    break
+                }
+            }
         }
-        if tiers?.ok != true { problems.append("walk: a clean columnCounts walk is ok") }
+
+        // THE TWO-KEY WIRE CONTRACT (6.1 intel, learned live at the 7.2
+        // install acceptance): the gateway validates the `apikey` HEADER
+        // against KNOWN keys, so the reader JWT there is a hard 401 before
+        // PostgREST runs. `apikey` must carry the ANON key and the bearer must
+        // carry the SCOPED credential — asserted on the actual wire request,
+        // exactly like the Python factory's AuthMechanism pins.
+        if let lastReq = StubURLProtocol.requests.last {
+            if lastReq.value(forHTTPHeaderField: "apikey") != "stub-anon" {
+                problems.append("walk: the apikey header must carry the ANON key "
+                    + "(got \(lastReq.value(forHTTPHeaderField: "apikey") ?? "nil")) — "
+                    + "a class JWT there is rejected by the gateway outright")
+            }
+            if lastReq.value(forHTTPHeaderField: "Authorization") != "Bearer stub-bearer" {
+                problems.append("walk: the Authorization header must carry the BEARER "
+                    + "credential (got \(lastReq.value(forHTTPHeaderField: "Authorization") ?? "nil"))")
+            }
+        } else {
+            problems.append("walk: no captured request to assert the two-key wire contract on")
+        }
+
+        // fetch() must THROW on an empty book — the fail-closed layer for the
+        // repo's most-repeated defect class (a grant blackout returning 200 []
+        // rendering as a clean zeroed dashboard). compose's chip is the second
+        // layer and is pinned separately; this pins the layer whose artifact is
+        // a thrown load, not a chip (delta round 2 — the guard was deletable
+        // under a green suite).
+        let emptyBook = LeadsRepository(client: client({ req in
+            if req.value(forHTTPHeaderField: "Prefer") == "count=exact" {
+                return .init(body: "[]", contentRange: "0-0/0")
+            }
+            return .init(body: "[]")
+        }))
+        if case .success = runAsync({ try await emptyBook.fetch() }) {
+            problems.append("walk: fetch() over an empty book must THROW (fail closed) — "
+                + "a 200-[] grant blackout must never compose a zeroed dashboard")
+        }
         return problems
     }
 
-    /// One stubbed `leads` row. Nonisolated so the stub's request handler — which
-    /// runs off the main actor — can build pages.
+    /// One stubbed `v_cec_leads` row. Nonisolated so the stub's request handler —
+    /// which runs off the main actor — can build pages.
     private nonisolated static func leadJSON(_ id: String,
                                              created: String = "2026-07-20T00:00:00+00:00") -> String {
-        #"{"id":"\#(id)","company_name":"C\#(id)","created_at":"\#(created)","enrichment_stage":"scraped"}"#
+        #"{"id":"\#(id)","company_name":"C\#(id)","created_at":"\#(created)","personalized":false,"has_research":false}"#
     }
 
     /// Run an async throwing call to completion from the synchronous selftest.
@@ -764,38 +782,43 @@ enum SelfTest {
 
     /// The filter contract: every headline figure is derived from the SAME filtered
     /// set as the list (the mixed-view bug class), lanes classify correctly, facet
-    /// menus count against the other dimensions, and a degraded lane read disables
-    /// the dimension instead of answering wrongly.
+    /// menus count against the other dimensions. (The lane-degradation family
+    /// left with its mechanism in 7.2 — lane inputs are essential now.)
     private static func leadFilterChecks() -> [String] {
         var problems: [String] = []
         let now = abNow
 
         func lead(_ id: String, source: String, industry: String, state: String?,
-                  location: String? = nil, stage: String, created: String) -> LeadRow {
+                  location: String? = nil, deepening: String = "none",
+                  personalized: Bool = false, hasResearch: Bool = false,
+                  created: String) -> LeadRow {
             LeadRow(id: id, companyName: "C\(id)", firstName: nil, industry: industry,
                     leadSource: source, city: nil, state: state, createdAt: created,
-                    enrichmentStage: stage, location: location)
+                    deepening: deepening, personalized: personalized,
+                    hasResearch: hasResearch, location: location)
         }
-        // 4 leads: 2 Florida (one deep + campaigned + replied, one standard),
+        // 4 leads: 2 Florida (one deep + emailed + replied, one standard),
         // 1 Texas (from free-text location), 1 unpersonalized California.
         let leads = [
             lead("a", source: "gmaps-leads", industry: "Solar", state: "FL",
-                 stage: "campaigned", created: "2026-07-20T12:00:00+00:00"),
+                 deepening: "in_progress", personalized: true, hasResearch: true,
+                 created: "2026-07-20T12:00:00+00:00"),
             lead("b", source: "gmaps-leads", industry: "Solar", state: "Florida",
-                 stage: "campaigned", created: "2026-07-20T12:00:00+00:00"),
+                 personalized: true, hasResearch: true,
+                 created: "2026-07-20T12:00:00+00:00"),
             lead("c", source: "sales-nav", industry: "Biotech", state: nil,
                  location: "Austin, Texas, United States",
-                 stage: "personalized", created: "2026-07-13T12:00:00+00:00"),
+                 personalized: true, hasResearch: true,
+                 created: "2026-07-13T12:00:00+00:00"),
             lead("d", source: "sales-nav", industry: "Biotech", state: "CA",
-                 stage: "scraped", created: "2026-07-06T12:00:00+00:00"),
+                 created: "2026-07-06T12:00:00+00:00"),
         ]
         let inputs = DashboardInputs(
             leads: leads, totalCount: 4, leadsComplete: true,
-            deepLaneLeadIDs: ["a"], personalizedLeadIDs: ["a", "b", "c"],
             repliedLeadIDs: ["a", "b"],
             messagedSends: [
                 .init(leadID: "a", sentAt: "2026-07-21T09:00:00+00:00"),
-                .init(leadID: "d", sentAt: "2026-07-21T09:00:00+00:00"),
+                .init(leadID: "b", sentAt: "2026-07-21T09:00:00+00:00"),
             ])
 
         // Unfiltered baseline.
@@ -824,24 +847,28 @@ enum SelfTest {
         if florida.leadsAddedWeekly.values.reduce(0, +) != 2 {
             problems.append("filter: the added trend must narrow with the filter")
         }
-        // Lead "d" was messaged but is filtered out — its send is not this view's trend.
-        if florida.leadsMessagedWeekly.values.reduce(0, +) != 1 {
-            problems.append("filter: the messaged trend must exclude sends to filtered-out leads "
+        // Both sends are to Florida leads — the whole trend survives this lens.
+        if florida.leadsMessagedWeekly.values.reduce(0, +) != 2 {
+            problems.append("filter: the messaged trend must cover the matching leads' sends "
                 + "(got \(florida.leadsMessagedWeekly.values.reduce(0, +)))")
         }
         // EVERY panel counts the filtered set — asserted by TOTAL, not by row count.
         // QA's mutation run proved the earlier `.count` checks were blind: swapping
-        // `byStatus`/`byRegion` to the unfiltered facets left the suite green, and
-        // those are precisely the panels this feature added. A sum can't be fooled
-        // by two categories collapsing to the same shape.
+        // `byRegion` to the unfiltered facets left the suite green, and those are
+        // precisely the panels this feature added. A sum can't be fooled by two
+        // categories collapsing to the same shape.
         for (name, items, expected) in [
             ("bySource", florida.bySource, 2), ("byIndustry", florida.byIndustry, 2),
-            ("byRegion", florida.byRegion, 2), ("byStatus", florida.byStatus, 2),
+            ("byRegion", florida.byRegion, 2),
         ] {
             let total = items.reduce(0) { $0 + $1.count }
             if total != expected {
                 problems.append("filter: \(name) must total the FILTERED set (got \(total), want \(expected))")
             }
+        }
+        // The funnel narrows too: Scraped = the 2 matching, Campaigned = the 2 emailed.
+        if florida.byStatus.map(\.count) != [2, 2, 2, 2] {
+            problems.append("filter: the funnel must count the FILTERED set (got \(florida.byStatus.map(\.count)))")
         }
         if florida.byRegion.first?.label != "Florida" {
             problems.append("filter: byRegion must describe the filtered set (got \(florida.byRegion.map(\.label)))")
@@ -853,11 +880,16 @@ enum SelfTest {
         // inside the filtered region, which made the assertion unfalsifiable.
         let california = ABLeadsData(inputs: inputs, filter: LeadFilter(region: "California"), now: now)
         if california.matchingCount != 1 || california.totals.emailed != 0 {
-            problems.append("filter: hero 'emailed' must count only MATCHING campaigned leads "
+            problems.append("filter: hero 'emailed' must count only MATCHING emailed leads "
                 + "(got \(california.totals.emailed) over \(california.matchingCount) leads)")
         }
         if california.totals.replies != 0 {
             problems.append("filter: replies must narrow with the filter (got \(california.totals.replies))")
+        }
+        // Sends to leads outside the lens are not this view's trend.
+        if california.leadsMessagedWeekly.values.reduce(0, +) != 0 {
+            problems.append("filter: the messaged trend must exclude sends to filtered-out leads "
+                + "(got \(california.leadsMessagedWeekly.values.reduce(0, +)))")
         }
 
         // Lane classification: deep beats standard; no opener → none.
@@ -916,52 +948,20 @@ enum SelfTest {
                 + "(got \(facets.lanes.map { "\($0.lane.rawValue)=\($0.count)" }))")
         }
 
-        // Degraded lane reads: the dimension is dropped rather than answered wrongly
-        // (empty id sets would classify every lead "Not personalized").
-        // Built through `compose`, not hand-assembled: a hand-built value encodes
-        // what I THINK the repository produces, and the flags that drive this
-        // behaviour (`partial`, `degradedReads`) are set there, not here.
-        let degradedInputs = LeadsRepository.compose(
-            leads: leads, totalCount: leads.count, leadsComplete: true,
-            deep: ([], ok: false), personalized: ([], ok: false),
-            replied: (inputs.repliedLeadIDs, ok: true),
-            messaged: (inputs.messagedSends, ok: true))
-        let degraded = ABLeadsData(inputs: degradedInputs, filter: LeadFilter(lane: .deep), now: now)
-        if degraded.laneFilterAvailable {
-            problems.append("filter: a failed lane read must disable the lane menu")
-        }
-        if degraded.effectiveFilter.lane != nil || degraded.matchingCount != 4 {
-            problems.append("filter: a lane filter over degraded lane data must be dropped, not applied "
-                + "(got \(degraded.matchingCount) leads)")
-        }
-        // …but the user's REQUESTED filter is preserved: the bar edits `filter`, so a
-        // suppressed dimension is restored when the read recovers instead of being
-        // silently written away on the next menu pick.
-        // The user's selection survives suppression — the view model still holds it,
-        // so the dimension comes back when the read recovers rather than being
-        // written away on the next menu pick. (The DATA object no longer carries the
-        // requested filter at all: that is what makes the caption unable to read it.)
-        let degradedVM = DashboardViewModel(fetcher: { degradedInputs })
-        degradedVM.apply(LeadFilter(lane: .deep))
-        _ = runMain { await degradedVM.load() }
-        if degradedVM.filter.lane != .deep {
-            problems.append("filter: suppressing a dimension must not discard the user's selection")
-        }
-        if degradedVM.state.value?.effectiveFilter.lane != nil {
-            problems.append("filter: the APPLIED filter must have the uncomputable dimension dropped")
-        }
-        // The list caption is what ASSERTS a lens over the rows. It must describe the
-        // applied filter, never the requested one — naming a suppressed dimension
-        // over the whole unfiltered book is the defect three review rounds found.
-        if degradedVM.state.value?.listCaption?.contains(LeadFilter.Lane.deep.label) == true {
-            problems.append("filter: the list caption must not name a dimension that was not applied "
-                + "(got \(degradedVM.state.value?.listCaption ?? "nil"))")
-        }
+        // (The degraded-lane suppression machinery is structurally gone since 7.2:
+        // lane inputs ride the essential v_cec_leads read, so a lane can no longer
+        // degrade independently of the book. The replied/sent degradation pins
+        // live in leadsComposeChecks.)
         if ABLeadsData.abFiltered.listCaption != ABLeadsData.abFiltered.effectiveFilter.summary {
             problems.append("filter: the list caption must be the APPLIED filter's summary")
         }
         // A degraded load names what is understated rather than showing a confident
         // zero — the flag alone rendered nowhere.
+        let degradedInputs = LeadsRepository.compose(
+            leads: leads, totalCount: leads.count, leadsComplete: true,
+            replied: ([], ok: false),
+            messaged: (inputs.messagedSends, ok: true))
+        let degraded = ABLeadsData(inputs: degradedInputs, now: now)
         if !degradedInputs.partial || degraded.degradedReads.isEmpty {
             problems.append("filter: a degraded load must carry named reads for the UI to surface")
         }
@@ -969,7 +969,7 @@ enum SelfTest {
         // The list is capped, and says so through matchingCount ≠ rendered rows.
         let many = (0..<(ABLeadsData.listCap + 5)).map {
             lead("m\($0)", source: "gmaps-leads", industry: "Solar", state: "FL",
-                 stage: "scraped", created: "2026-07-20T12:00:00+00:00")
+                 created: "2026-07-20T12:00:00+00:00")
         }
         let capped = ABLeadsData(inputs: DashboardInputs(leads: many, totalCount: many.count,
                                                          leadsComplete: true), now: now)
@@ -984,7 +984,7 @@ enum SelfTest {
         // stopped totalling the set.
         let manyCategories = (0..<12).map { i in
             lead("o\(i)", source: "src-\(i)", industry: "ind-\(i)", state: "FL",
-                 stage: "scraped", created: "2026-07-20T12:00:00+00:00")
+                 created: "2026-07-20T12:00:00+00:00")
         }
         let folded = ABLeadsData(inputs: DashboardInputs(
             leads: manyCategories, totalCount: 12, leadsComplete: true), now: now)
@@ -1015,7 +1015,7 @@ enum SelfTest {
         let nullish = ABLeadsData(inputs: DashboardInputs(
             leads: [LeadRow(id: "n", companyName: "N", firstName: nil, industry: nil,
                             leadSource: nil, city: nil, state: nil,
-                            createdAt: "2026-07-20T12:00:00+00:00", enrichmentStage: "scraped")],
+                            createdAt: "2026-07-20T12:00:00+00:00")],
             totalCount: 1, leadsComplete: true), filter: LeadFilter(source: LeadFacets.unknown), now: now)
         if nullish.matchingCount != 1 || nullish.recentLeads.first?.source != LeadFacets.unknown
             || nullish.recentLeads.first?.industry != LeadFacets.unknown {
@@ -1027,7 +1027,7 @@ enum SelfTest {
         // three different weeks is one lead reached.
         let repeatSends = ABLeadsData(inputs: DashboardInputs(
             leads: [lead("r", source: "gmaps-leads", industry: "Solar", state: "FL",
-                         stage: "campaigned", created: "2026-07-06T12:00:00+00:00")],
+                         personalized: true, created: "2026-07-06T12:00:00+00:00")],
             totalCount: 1, leadsComplete: true,
             messagedSends: [.init(leadID: "r", sentAt: "2026-07-08T09:00:00+00:00"),
                             .init(leadID: "r", sentAt: "2026-07-15T09:00:00+00:00"),
@@ -1182,16 +1182,15 @@ enum SelfTest {
     private static func leadsComposeChecks(sampleLeads: [LeadRow]) -> [String] {
         var problems: [String] = []
 
-        // Every supplementary read ok (even when empty) → NOT partial, NOT degraded.
+        // Every supplementary read ok (even when empty) → NOT partial.
         let clean = LeadsRepository.compose(
             leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
-            deep: (["a"], ok: true), personalized: (["a", "b"], ok: true),
-            replied: ([], ok: true))
-        if clean.partial || clean.lanesDegraded {
-            problems.append("leads-compose: ok reads must not mark partial/degraded")
+            replied: (["a"], ok: true))
+        if clean.partial {
+            problems.append("leads-compose: ok reads must not mark partial")
         }
-        if clean.deepLaneLeadIDs != ["a"] || clean.personalizedLeadIDs != ["a", "b"] {
-            problems.append("leads-compose: lane id sets not packaged through")
+        if clean.repliedLeadIDs != ["a"] {
+            problems.append("leads-compose: replied id set not packaged through")
         }
         if !clean.leadsComplete { problems.append("leads-compose: a full page walk over the whole table is complete") }
 
@@ -1209,55 +1208,17 @@ enum SelfTest {
             problems.append("leads-compose: a capped page walk must not read as complete")
         }
 
-        // A failed LANE read → partial AND degraded (the lane menu disables itself).
-        let laneFailed = LeadsRepository.compose(
-            leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
-            deep: ([], ok: false), personalized: ([], ok: true), replied: ([], ok: true))
-        if !laneFailed.partial || !laneFailed.lanesDegraded {
-            problems.append("leads-compose: a failed lane read must mark partial AND degraded")
-        }
-        // A failed REPLIES read is partial but not lane-degraded — the reply figure
-        // is understated, the lane classification is still sound.
+        // A failed REPLIES read is partial and NAMES itself — the reply figure is
+        // understated, and a bare flag renders nowhere.
         let repliesFailed = LeadsRepository.compose(
             leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
-            deep: ([], ok: true), personalized: ([], ok: true), replied: ([], ok: false))
-        if !repliesFailed.partial || repliesFailed.lanesDegraded {
-            problems.append("leads-compose: a failed replies read is partial, not lane-degraded")
+            replied: ([], ok: false))
+        if !repliesFailed.partial || !repliesFailed.degradedReads.contains("replies") {
+            problems.append("leads-compose: a failed replies read must mark partial and name itself "
+                + "(got \(repliesFailed.degradedReads))")
         }
 
-        // The widget/packer path still reads exact stage counts off DashboardInputs.
-        let withStatus = DashboardInputs(
-            leads: sampleLeads, totalCount: 720,
-            statusCounts: ["scraped": 400, "personalized": 300, "unknown": 20])
-        if case .statusBoard(let board)? = DashboardBuilder.widgetData(withStatus)["by-status"] {
-            if board.title != "Leads by Status" {
-                problems.append("leads-compose: exact status board must not carry a window suffix (got '\(board.title)')")
-            }
-            if board.groups.reduce(0, { $0 + $1.count }) != 720 {
-                problems.append("leads-compose: exact status counts must sum to the table total")
-            }
-            if Set(board.groups.map { $0.label }) != ["Scraped", "Personalized", "Unknown"] {
-                problems.append("leads-compose: exact status labels unexpected")
-            }
-        } else { problems.append("leads-compose: exact by-status is not a status board") }
-        let noStatus = DashboardInputs(leads: sampleLeads, totalCount: 720)
-        if case .statusBoard(let board)? = DashboardBuilder.widgetData(noStatus)["by-status"],
-           !board.title.contains("(latest") {
-            problems.append("leads-compose: fallback status board must carry the window suffix")
-        }
-        if case .chart(let c)? = DashboardBuilder.build(clean).widgets["added-weekly"],
-           c.title.contains("partial") {
-            problems.append("leads-compose: clean load must not title the chart partial")
-        }
-
-        // A partial load surfaces in the chart title (the partial signal moved there
-        // when recent-leads left the grid, P3).
-        if case .chart(let c)? = DashboardBuilder.build(laneFailed).widgets["added-weekly"],
-           !c.title.contains("partial") {
-            problems.append("leads-compose: partial must surface in the added-weekly title")
-        }
-
-        // leadIDs (the lane/replied page parser): an unparseable 2xx body is a
+        // leadIDs (the replied-set page parser): an unparseable 2xx body is a
         // FAILED page (nil), never an empty one — same contract as `tally`, and it
         // matters more here (an "empty" lane set misclassifies every lead).
         if LeadsRepository.leadIDs(Data("not json".utf8)) != nil {
@@ -1322,11 +1283,11 @@ enum SelfTest {
             problems.append("leads-compose: an empty read must fail CLOSED (200 [] is what a "
                 + "revoked RLS policy returns), got complete=\(blackout.leadsComplete)")
         }
-        if !blackout.degradedReads.contains(where: { $0.contains("unreadable") }) {
+        if !blackout.degradedReads.contains(where: { $0.contains("reader grant") }) {
             problems.append("leads-compose: an empty read must name itself (got \(blackout.degradedReads))")
         }
 
-        // The send_queue page parser: the PRODUCER half of the flat-zero-trend
+        // The sent-events page parser: the PRODUCER half of the flat-zero-trend
         // CRITICAL. Pinning only `compose`'s handling of a hand-built `ok: false`
         // left a mutation alive — flipping this page's failure return to `true`
         // passed the entire suite.
@@ -1352,103 +1313,15 @@ enum SelfTest {
             problems.append("cursor: a blank id must not be used as a cursor")
         }
 
-        // A failed send_queue read must degrade, not render as a book nobody emailed.
+        // A failed sent-events read must degrade, not render as a book nobody emailed.
         let sendsFailed = LeadsRepository.compose(
             leads: sampleLeads, totalCount: sampleLeads.count, leadsComplete: true,
             messaged: ([], ok: false))
         if !sendsFailed.partial || !sendsFailed.degradedReads.contains("outreach history") {
-            problems.append("leads-compose: a failed send_queue read must mark partial and name itself "
+            problems.append("leads-compose: a failed sent-events read must mark partial and name itself "
                 + "(got \(sendsFailed.degradedReads))")
         }
-        if sendsFailed.lanesDegraded {
-            problems.append("leads-compose: a failed send_queue read must not disable the lane menu")
-        }
 
-        // tally (the paged read's pure page parser): an unparseable 2xx body must
-        // read as a FAILED page (nil), never as "empty & complete" — the review-fix
-        // pin for the partial-honesty contract.
-        if LeadsRepository.tally(Data("not json".utf8), column: "lead_tier") != nil {
-            problems.append("leads-tally: garbage body must be nil (failed read), not empty")
-        }
-        let page = LeadsRepository.tally(
-            Data(#"[{"lead_tier":"1"},{"lead_tier":"1"},{"lead_tier":" "},{"lead_tier":null}]"#.utf8),
-            column: "lead_tier")
-        if page?.counts != ["1": 2] || page?.rows != 4 {
-            problems.append("leads-tally: expected {1:2}/4 rows, got \(String(describing: page))")
-        }
-        if let empty = LeadsRepository.tally(Data("[]".utf8), column: "lead_tier"),
-           empty.rows != 0 || !empty.counts.isEmpty {
-            problems.append("leads-tally: [] must be an EMPTY page (0 rows), not a failure")
-        } else if LeadsRepository.tally(Data("[]".utf8), column: "lead_tier") == nil {
-            problems.append("leads-tally: [] must parse (empty page), not read as failed")
-        }
-
-        // Voice caveats: a degraded/floored tier read speaks "incomplete", which is
-        // distinct from the recency-window "sampled" note (source/industry).
-        let spoken = LeadAnswers.breakdown(["1": 2], singular: "tier", plural: "tiers",
-                                           incomplete: true)
-        if !spoken.contains("may be incomplete") {
-            problems.append("leads-voice: incomplete tally must carry the caveat (got \(spoken))")
-        }
-        if LeadAnswers.breakdown(["1": 2], singular: "tier", plural: "tiers").contains("incomplete") {
-            problems.append("leads-voice: a clean tally must not carry the incomplete caveat")
-        }
-
-        return problems
-    }
-
-    /// Exercises the backlog compose (P6): enrollment exclusion + excluded
-    /// count, GENERIC reason bucketing (a novel reason must not vanish),
-    /// cohort ("?","?") fallbacks + largest-first ordering, truncation flag.
-    /// Mirrors ce doctor's check_dead_ends semantics exactly.
-    private static func backlogComposeChecks() -> [String] {
-        var problems: [String] = []
-        func flag(_ id: String?, reason: String?, source: String? = "sales-nav",
-                  query: String? = "biotech-europe") -> CampaignReadyRow {
-            CampaignReadyRow(leadId: id, leadSource: source, searchQuery: query,
-                             blockingReason: reason)
-        }
-
-        let composed = BacklogRepository.compose(
-            flagged: [
-                flag("a", reason: "unedited"),
-                flag("b", reason: "unedited"),
-                flag("c", reason: "unedited", source: "gmaps-leads", query: "coffee carts"),
-                flag("d", reason: "no_email_yet"),          // novel reason — must survive
-                flag("e", reason: nil, source: nil, query: nil),   // all fallbacks
-                flag("x", reason: "unedited"),              // enrolled → excluded
-                flag(nil, reason: "unedited"),              // nil id → NOT excludable, counted
-            ],
-            enrolled: ["x", "unrelated"],
-            scanTruncated: true)
-        if composed.byReason != ["unedited": 4, "no_email_yet": 1, "?": 1] {
-            problems.append("backlog: reason buckets wrong (got \(composed.byReason))")
-        }
-        if composed.alreadyEnrolled != 1 {
-            problems.append("backlog: exactly one enrolled lead must be excluded")
-        }
-        // Full ordering pin: largest first, then (source, query) ascending
-        // tiebreak — and never force-unwrap (a regression must report, not
-        // crash the harness).
-        let cohortTuples = composed.cohorts.map { ($0.source, $0.query, $0.count) }
-        let expectedCohorts = [("sales-nav", "biotech-europe", 4),
-                               ("?", "?", 1),
-                               ("gmaps-leads", "coffee carts", 1)]
-        if cohortTuples.count != expectedCohorts.count
-            || !zip(cohortTuples, expectedCohorts).allSatisfy({ $0 == $1 }) {
-            problems.append("backlog: cohort ordering/tiebreak wrong (got \(cohortTuples))")
-        }
-        if !composed.scanTruncated {
-            problems.append("backlog: truncation flag must pass through")
-        }
-
-        // Fully-enrolled backlog → empty buckets + full excluded count.
-        let allEnrolled = BacklogRepository.compose(
-            flagged: [flag("a", reason: "unedited"), flag("b", reason: "no_opener")],
-            enrolled: ["a", "b"], scanTruncated: false)
-        if !allEnrolled.byReason.isEmpty || allEnrolled.alreadyEnrolled != 2 {
-            problems.append("backlog: fully-enrolled set must compose empty + count 2 excluded")
-        }
         return problems
     }
 
@@ -1520,7 +1393,7 @@ enum SelfTest {
         // inbound sentiments are ignored. Out-of-order input gets re-sorted.
         let composed = ProfileRepository.compose(
             lead: lead,
-            enrichment: (nil, ok: true),
+            enrichment: nil,
             interactions: ([
                 interaction("2026-07-02T10:00:00+00:00", direction: "inbound", sentiment: "negative"),
                 interaction("2026-07-01T10:00:00+00:00", direction: "outbound"),
@@ -1541,22 +1414,50 @@ enum SelfTest {
             problems.append("profile: displayName should join first+last (got \(composed.lead.displayName))")
         }
 
-        // A failed supplementary read marks partial; empty timeline never crashes.
-        let degraded = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: false), interactions: ([], ok: true))
-        if !degraded.partial { problems.append("profile: failed enrichment must mark partial") }
-        if degraded.sentiment != nil { problems.append("profile: empty timeline must yield nil sentiment") }
+        // A missing generated row is a FACT, not a failure: no partial banner, and
+        // the Personalization card suppresses via nil. Empty timeline never crashes.
+        let noGenerated = ProfileRepository.compose(
+            lead: lead, enrichment: nil, interactions: ([], ok: true))
+        if noGenerated.partial { problems.append("profile: a lead with no generated row is not a partial dossier") }
+        if noGenerated.sentiment != nil { problems.append("profile: empty timeline must yield nil sentiment") }
         let failedTimeline = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true), interactions: ([], ok: false))
+            lead: lead, enrichment: nil, interactions: ([], ok: false))
         if !failedTimeline.interactionsFailed || !failedTimeline.partial {
             problems.append("profile: failed interactions read must set interactionsFailed + partial")
         }
+        // The CORRUPT-generated flag is a fail-closed signal on the same axis
+        // (delta round 3: the `|| enrichmentCorrupt` term was deletable under
+        // a green suite — the exact shape the round-2 blocker closed, one
+        // file over).
+        let corruptGenerated = ProfileRepository.compose(
+            lead: lead, enrichment: nil, interactions: ([], ok: true),
+            enrichmentCorrupt: true)
+        if !corruptGenerated.enrichmentCorrupt || !corruptGenerated.partial {
+            problems.append("profile: a generated half that failed to DECODE must set "
+                + "enrichmentCorrupt + partial — corruption must not render identically "
+                + "to a lead that was never enriched")
+        }
+        // The all-NULL generated half (the LEFT JOIN's shape for an unenriched
+        // lead) must classify as empty so the repository synthesizes nil — an
+        // "enrichment" of nils would render an empty Personalization card.
+        let blank = LeadEnrichmentRow(
+            casualizedFirstName: nil, casualizedCompanyName: nil, casualizedCityName: nil,
+            personalizationProject: nil, personalizationDetail: nil,
+            personalizedOpener: nil, personalizedOffer: nil, research: nil,
+            casualizedShape: nil)
+        if !blank.isEmpty { problems.append("profile: an all-nil generated row must read as empty") }
+        let oneField = LeadEnrichmentRow(
+            casualizedFirstName: nil, casualizedCompanyName: nil, casualizedCityName: nil,
+            personalizationProject: nil, personalizationDetail: nil,
+            personalizedOpener: "hi", personalizedOffer: nil, research: nil,
+            casualizedShape: nil)
+        if oneField.isEmpty { problems.append("profile: any populated generated field must defeat isEmpty") }
 
         // PRODUCTION SHAPE (QA live finding): metadata jsonb is DOUBLE-ENCODED —
         // a JSON string, not an object. meta() must decode it or the sentiment
         // badge is dead against every real lead.
         let doubleEncoded = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true),
+            lead: lead, enrichment: nil,
             interactions: ([LeadInteractionRow(
                 id: nil, interactionType: "email", direction: "inbound", subject: nil,
                 summary: nil, transcript: nil,
@@ -1569,7 +1470,7 @@ enum SelfTest {
 
         // Metadata that is garbage / non-object stays harmless.
         let noMeta = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true),
+            lead: lead, enrichment: nil,
             interactions: ([LeadInteractionRow(
                 id: nil, interactionType: "email", direction: "inbound", subject: nil,
                 summary: nil, transcript: nil, metadata: .string("oops"),
@@ -1581,7 +1482,7 @@ enum SelfTest {
         // Chronology is by PARSED date: mixed Z / +00:00 / fractional formats
         // and a nil timestamp must still order correctly (nil sinks first).
         let mixed = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true),
+            lead: lead, enrichment: nil,
             interactions: ([
                 interaction("2026-07-02T10:00:00Z", direction: "outbound"),
                 interaction(nil, direction: "outbound"),
@@ -1607,7 +1508,7 @@ enum SelfTest {
                         direction: "outbound")
         }
         let overCap = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true),
+            lead: lead, enrichment: nil,
             interactions: ((0...cap).map(stamped), ok: true))   // cap+1 rows
         if !overCap.interactionsTruncated || overCap.interactions.count != cap {
             problems.append("profile: cap+1 rows must trim to newest cap + flag truncated")
@@ -1616,7 +1517,7 @@ enum SelfTest {
             problems.append("profile: truncation must drop the OLDEST row, not the newest")
         }
         let atCap = ProfileRepository.compose(
-            lead: lead, enrichment: (nil, ok: true),
+            lead: lead, enrichment: nil,
             interactions: ((1...cap).map(stamped), ok: true))   // exactly cap
         if atCap.interactionsTruncated {
             problems.append("profile: exactly-cap rows must NOT flag truncated")
@@ -1693,14 +1594,14 @@ enum SelfTest {
         }
 
         // Personalization grid: same blank-drop rule, same verbatim payload.
+        // (Source/Status/Tier left with the lead_enrichment table — 7.2.)
         let enrichment = LeadEnrichmentRow(
             casualizedFirstName: " Ana ", casualizedCompanyName: "", casualizedCityName: nil,
             personalizationProject: "roof retrofits", personalizationDetail: nil,
             personalizedOpener: "opener", personalizedOffer: nil,
-            enrichmentSource: "local-web-research", enrichmentStatus: "partial",
-            leadTier: "2", webResearchJson: nil)
+            research: nil, casualizedShape: "object")
         let pFacts = ProfileFacts.personalization(enrichment)
-        if pFacts.map(\.label) != ["Casual name", "Project ref", "Source", "Status"] {
+        if pFacts.map(\.label) != ["Casual name", "Project ref"] {
             problems.append("copy: personalization facts wrong or a blank leaked "
                 + "(\(pFacts.map(\.label)))")
         }
@@ -1745,10 +1646,14 @@ enum SelfTest {
         }
 
         // The pasteboard round-trip itself, and that a write reports success.
+        // Save + restore the user's clipboard around the probe — a diagnostic
+        // must not eat whatever the operator had copied (swift-semantics note).
+        let saved = NSPasteboard.general.string(forType: .string)
         if !Pasteboard.copy("selftest-probe")
             || NSPasteboard.general.string(forType: .string) != "selftest-probe" {
             problems.append("copy: pasteboard round-trip failed")
         }
+        if let saved { _ = Pasteboard.copy(saved) }
         problems.append(contentsOf: sanitizerChecks())
         problems.append(contentsOf: previewRenderChecks())
         return problems
@@ -1867,554 +1772,4 @@ enum SelfTest {
         return problems
     }
 
-    /// Exercises the campaigns data path: name-join (trim/case-fold), same-source
-    /// sent/replies binding, unnamed-campaign isolation, "Other" status rollup, the
-    /// reply-rate zero guard, and the `partial` (degraded/truncated) surface.
-    private static func campaignChecks() -> [String] {
-        var problems: [String] = []
-
-        // Empty in → empty out, not partial; the table renders with zero rows.
-        let empty = CampaignsRepository.compose(
-            campaigns: [], tracking: [], leadRows: [], partial: false)
-        if !empty.summaries.isEmpty || empty.partial {
-            problems.append("campaigns: empty compose should be empty + not partial")
-        }
-
-        // Fixture: tracking wins for matched names; roster fills the rest; two unnamed
-        // campaigns must NOT share a tracking row (and must not grab the decoy below).
-        let campaigns = [
-            CampaignRow(id: "c1", campaignName: "Alpha", status: "active", createdAt: nil),
-            CampaignRow(id: "c2", campaignName: "  Beta  ", status: "paused", createdAt: nil),  // whitespace → "beta"
-            CampaignRow(id: "c3", campaignName: nil, status: "active", createdAt: nil),         // unnamed
-            CampaignRow(id: "c4", campaignName: nil, status: "active", createdAt: nil),         // unnamed #2
-        ]
-        let tracking = [
-            CampaignTrackingRow(campaignName: "alpha", totalLeads: 120, totalSent: 100, totalReplies: 5, totalBounced: 1, bounceRate: nil),
-            CampaignTrackingRow(campaignName: "beta", totalLeads: 60, totalSent: 50, totalReplies: 0, totalBounced: 0, bounceRate: nil),
-            CampaignTrackingRow(campaignName: "untitled campaign", totalLeads: 999, totalSent: 999, totalReplies: 999, totalBounced: 0, bounceRate: nil), // decoy
-        ]
-        let leadRows = [
-            CampaignLeadRow(campaignId: "c1", status: "sent"), CampaignLeadRow(campaignId: "c1", status: "sent"),
-            CampaignLeadRow(campaignId: "c1", status: "replied"), CampaignLeadRow(campaignId: "c1", status: "pending"),
-            CampaignLeadRow(campaignId: "c3", status: "sent"), CampaignLeadRow(campaignId: "c3", status: "sent"),
-            CampaignLeadRow(campaignId: "c3", status: "sent"), CampaignLeadRow(campaignId: "c3", status: "sent"),
-            CampaignLeadRow(campaignId: "c3", status: "weirdstatus"), CampaignLeadRow(campaignId: "c3", status: "weirdstatus"),
-            CampaignLeadRow(campaignId: "c4", status: "pending"),
-        ]
-        let inputs = CampaignsRepository.compose(
-            campaigns: campaigns, tracking: tracking, leadRows: leadRows, partial: false)
-        let byId = Dictionary(uniqueKeysWithValues: inputs.summaries.map { ($0.id, $0) })
-
-        // Matched name → tracking sent/replies (NOT roster's 2 sent / 1 reply).
-        if byId["c1"]?.totalSent != 100 || byId["c1"]?.totalReplies != 5 {
-            problems.append("campaigns: matched campaign should bind sent/replies from tracking")
-        }
-        // Whitespace name normalizes to match "beta".
-        if byId["c2"]?.totalSent != 50 {
-            problems.append("campaigns: trimmed name should join tracking ('  Beta  ' → 'beta')")
-        }
-        // Unnamed → roster fallback, and MUST NOT pick up the "untitled campaign" decoy.
-        if byId["c3"]?.totalSent != 4 {
-            problems.append("campaigns: unnamed campaign should use roster sent (4), not the decoy tracking row")
-        }
-        if byId["c4"]?.totalSent != 0 {
-            problems.append("campaigns: second unnamed campaign should not share c3/decoy numbers")
-        }
-
-        // Reply-rate zero guard: c4 (sent=0) must yield nil (renders "—").
-        if byId["c4"]?.replyRatePercent != nil {
-            problems.append("campaigns: zero-sent campaign should have nil reply rate")
-        }
-        // partial=true must survive compose (the drill header captions it).
-        let degraded = CampaignsRepository.compose(
-            campaigns: campaigns, tracking: tracking, leadRows: leadRows, partial: true)
-        if !degraded.partial {
-            problems.append("campaigns: partial flag must survive compose")
-        }
-
-        // ── Funnel chips (drill level 2): canonical order + Other rollup ─────
-        // "Sent" (capitalized) must case-fold into the canonical bucket, not
-        // vanish from both branches (QA adversarial finding).
-        let funnel = ABCampaignLeadsView.funnelEntries(
-            ["pending": 1, "Sent": 4, "weirdstatus": 2, "heldover": 1])
-        if funnel.map(\.label) != ["Pending", "Sent", "Other"] {
-            problems.append("campaigns: funnel should keep canonical order, case-fold "
-                + "keys, + roll non-canonical into Other (got \(funnel.map(\.label)))")
-        }
-        if funnel.last?.count != 3 {
-            problems.append("campaigns: Other should sum non-canonical counts (got \(funnel.last?.count ?? -1))")
-        }
-        if ABCampaignLeadsView.funnelEntries([:]).isEmpty == false {
-            problems.append("campaigns: empty funnel should have no chips")
-        }
-
-        // ── Roster left-join (P4 inspector) ─────────────────────────────────
-        func rosterRow(_ id: String?, status: String = "sent") -> CampaignRosterRow {
-            CampaignRosterRow(leadId: id, status: status, addedAt: "2026-07-01T00:00:00+00:00")
-        }
-        let names = ["L1": LeadSearchHit(id: "L1", companyName: "Acme", email: "a@x.com"),
-                     "L2": LeadSearchHit(id: "L2", companyName: nil, email: "b@x.com")]
-        let roster = CampaignsRepository.composeRoster(
-            rows: [rosterRow("L1"), rosterRow("L2"), rosterRow("L3"), rosterRow(nil)],
-            names: names)
-        if roster.map(\.leadId) != ["L1", "L2", "L3"] {
-            problems.append("campaigns: roster must preserve order + drop nil lead_ids "
-                + "(got \(roster.map(\.leadId)))")
-        }
-        if roster.first?.companyName != "Acme" {
-            problems.append("campaigns: roster join lost the lead name")
-        }
-        if roster[1].companyName != nil || roster[1].email != "b@x.com" {
-            problems.append("campaigns: nil company must keep email fallback")
-        }
-        if roster[2].companyName != nil || roster[2].email != nil {
-            problems.append("campaigns: unmatched lead must keep nils (left join)")
-        }
-        if CampaignsRepository.composeRoster(rows: [], names: [:]).isEmpty == false {
-            problems.append("campaigns: empty roster must compose empty")
-        }
-
-        // ── Correspondence merge (drill level 3) ─────────────────────────────
-        func interaction(_ at: String?, dir: String, id: String? = "pk-\(UUID().uuidString.prefix(8))",
-                         subject: String? = nil,
-                         transcript: String? = nil, summary: String? = nil,
-                         meta: JSONValue? = nil) -> LeadInteractionRow {
-            LeadInteractionRow(id: id, interactionType: "email", direction: dir,
-                               subject: subject, summary: summary,
-                               transcript: transcript, metadata: meta,
-                               source: "test", interactionAt: at)
-        }
-        func queueRow(_ id: String, status: String, step: Int = 2,
-                      scheduled: String? = nil,
-                      sent: String? = nil, body: String? = nil) -> SendQueueDetailRow {
-            SendQueueDetailRow(id: id, stepNumber: step, variantIndex: nil,
-                               sendingAccount: "a@x.com", status: status,
-                               scheduledAt: scheduled, sentAt: sent,
-                               toEmail: "l@y.com", error: nil,
-                               subjectOverride: nil, bodyOverride: body)
-        }
-
-        let (merged, mergedTruncated) = CampaignsRepository.composeCorrespondence(
-            campaignId: "c1",
-            interactions: [   // newest-first, as fetched
-                interaction("2026-06-06T02:00:00+00:00", dir: "inbound", id: "pk-in",
-                            transcript: "the reply text"),
-                // NUMERIC metadata — the shape ce-outbound actually writes
-                // (step_number/variant_index as JSON numbers, QA driver A3):
-                // dedupe reads queue_id, attribution reads the numbers.
-                interaction("2026-06-05T15:00:00+00:00", dir: "outbound", id: "pk-out",
-                            subject: "step 1",
-                            meta: .object(["queue_id": .string("q-sent"),
-                                           "campaign_id": .string("c2"),
-                                           "step_number": .number(1),
-                                           "variant_index": .number(2)])),
-                // Legacy outbound archive: NO queue_id (predates stamping),
-                // numeric step via DOUBLE-ENCODED metadata.
-                interaction("2026-06-01T10:00:30+00:00", dir: "outbound", id: "pk-legacy",
-                            subject: "step 3 legacy",
-                            meta: .string(#"{"step_number":3,"campaign_id":"c1"}"#)),
-            ],
-            queue: [
-                queueRow("q-sent", status: "sent", sent: "2026-06-05T15:00:00+00:00"),    // archived → dropped
-                queueRow("q-legacy", status: "sent", step: 3,
-                         sent: "2026-06-01T10:01:00+00:00"),  // no queue_id, but same step ±180s → fuzzy-deduped
-                queueRow("q-orphan", status: "sent", step: 9,
-                         sent: "2026-05-01T10:00:00+00:00"),  // no archive anywhere → kept
-                queueRow("q-bounced", status: "failed", sent: "2026-06-07T00:00:00+00:00"),
-                queueRow("q-staged", status: "pending", scheduled: "2026-06-12T16:00:00+00:00",
-                         body: "override body"),
-            ])
-        if mergedTruncated {
-            problems.append("correspondence: under-cap merge must not flag truncated")
-        }
-        if merged.map(\.id).contains("sq-q-sent") {
-            problems.append("correspondence: archived sent queue row must dedupe out")
-        }
-        if merged.map(\.id).contains("sq-q-legacy") {
-            problems.append("correspondence: legacy sent row (same step, Δt<180s vs outbound archive) must fuzzy-dedupe")
-        }
-        if !merged.map(\.id).contains("sq-q-orphan") {
-            problems.append("correspondence: unarchived sent queue row must render")
-        }
-        if merged.first?.id != "sq-q-orphan" || merged.last?.isStaged != true {
-            problems.append("correspondence: must sort ascending (orphan first, staged last) "
-                + "— got \(merged.map(\.id))")
-        }
-        if merged.last?.body != "override body" || merged.last?.bodyUnreadable != false {
-            problems.append("correspondence: body_override must render on staged rows")
-        }
-        // q-bounced: failed + archived queue_id? No — its id isn't in any
-        // metadata, so it stays "failed". Bounce synthesis needs the archive:
-        let (bounceMerge, _) = CampaignsRepository.composeCorrespondence(
-            campaignId: "c1",
-            interactions: [interaction("2026-06-05T15:00:00+00:00", dir: "outbound", id: "pk-b",
-                                       subject: "s",
-                                       meta: .object(["queue_id": .string("q-b")]))],
-            queue: [queueRow("q-b", status: "failed", sent: "2026-06-05T15:00:00+00:00")])
-        if bounceMerge.first(where: { $0.id == "sq-q-b" })?.queueStatus != "bounced" {
-            problems.append("correspondence: failed row with archived send must synthesize 'bounced'")
-        }
-        let outbound = merged.first { $0.id == "int-pk-out" }
-        if outbound == nil {
-            problems.append("correspondence: interaction ids must derive from the PK (int-pk-out missing: \(merged.map(\.id)))")
-        }
-        if outbound?.stepNumber != 1 || outbound?.variantIndex != 2 {
-            problems.append("correspondence: NUMERIC metadata step/variant must surface (got \(String(describing: outbound?.stepNumber))/\(String(describing: outbound?.variantIndex)))")
-        }
-        if outbound?.bodyUnreadable != true {
-            problems.append("correspondence: subject-only outbound archive must flag bodyUnreadable")
-        }
-        if outbound?.fromOtherCampaign != true {
-            problems.append("correspondence: metadata campaign c2 ≠ drill c1 must flag fromOtherCampaign")
-        }
-        let inbound = merged.first { $0.direction == "inbound" }
-        if inbound?.body != "the reply text" || inbound?.fromOtherCampaign != false {
-            problems.append("correspondence: inbound transcript/campaign flags wrong")
-        }
-        if CampaignsRepository.composeCorrespondence(
-            campaignId: "c1", interactions: [], queue: []).items.isEmpty == false {
-            problems.append("correspondence: empty in must compose empty")
-        }
-
-        // Card labels: the role mappings the timeline colors hang off.
-        if let staged = merged.last, ABCorrespondenceView.cardLabel(staged).text != "Staged" {
-            problems.append("correspondence: pending queue row should label 'Staged'")
-        }
-        if inbound.map(ABCorrespondenceView.cardLabel)?.role != .reward {
-            problems.append("correspondence: inbound must carry the reward role")
-        }
-        if ABCorrespondenceView.cardLabel(CorrespondenceItem(
-            id: "sq-x", kind: .queued, queueId: "x", direction: nil,
-            queueStatus: "sending", subject: nil, body: nil, bodyUnreadable: true,
-            stepNumber: nil, variantIndex: nil, sendingAccount: nil, toEmail: nil,
-            error: nil, date: nil, timestamp: nil, fromOtherCampaign: false)).text != "Sending" {
-            problems.append("correspondence: 'sending' must label as Sending (in-flight), not fall to default")
-        }
-
-        // Step/angle wording: variant_index is the step-1 ANGLE; on later
-        // steps it's attribution, never the copy variant (sender contract).
-        if ABCorrespondenceView.stepLabel(step: 1, variantIndex: 0) != "step 1 · angle A"
-            || ABCorrespondenceView.stepLabel(step: 2, variantIndex: 2) != "step 2 · angle C attributed"
-            || ABCorrespondenceView.stepLabel(step: 2, variantIndex: nil) != "step 2"
-            || ABCorrespondenceView.stepLabel(step: nil, variantIndex: 1) != nil {
-            problems.append("correspondence: stepLabel angle wording regressed")
-        }
-
-        // ── The write path's guard triple (the only barrier between the write
-        // credential and a project-wide send_queue rewrite) ──────────────────
-        let goodId = "abcdef12-3456-7890-abcd-ef1234567890"
-        let u = SupabaseWriteClient.stagedCopyURL(
-            base: SupabaseConfig.restURL, queueId: goodId)?.absoluteString ?? ""
-        for required in ["id=eq.\(goodId)", "status=eq.pending", "claimed_at=is.null"]
-        where !u.contains(required) {
-            problems.append("write: staged-copy PATCH lost its \(required) guard (url: \(u))")
-        }
-        for badId in ["", "abc", "x'; DROP--", "abcdef12-3456-7890-abcd-ef1234567890,status=eq.sent"]
-        where SupabaseWriteClient.stagedCopyURL(base: SupabaseConfig.restURL, queueId: badId) != nil {
-            problems.append("write: non-UUID queue id '\(badId)' must not produce a PATCH URL")
-        }
-        // Subject header hygiene: newlines/control chars can never reach the
-        // SMTP header line (bare-\n malformed-header incident class).
-        if SupabaseWriteClient.sanitizedSubject("hi\nBcc: a@evil.com") != "hi Bcc: a@evil.com" {
-            problems.append("write: sanitizedSubject must fold newlines to spaces")
-        }
-        if SupabaseWriteClient.sanitizedSubject("a\r\nb\u{07}c") != "a bc" {
-            problems.append("write: sanitizedSubject must strip control characters")
-        }
-        if SupabaseWriteClient.sanitizedSubject("  \n ") != nil {
-            problems.append("write: whitespace-only subject must clear to nil")
-        }
-        if SupabaseWriteClient.sanitizedSubject("plain subject") != "plain subject" {
-            problems.append("write: sanitizedSubject must pass clean subjects through")
-        }
-
-        // ── Revision lint (sender contract: unknown slots + stripped links) ──
-        // The allow decision mirrors _OWN_LINK_RE exactly: https-only,
-        // apex-or-www, full token (delta review — the loose form let
-        // bare/http/www first-party links through to be mangled at the sink).
-        if RevisionLint.problem(subject: nil, body: "Hey {{greetingLine}},\nsee https://atlasautomates.com/work") != nil {
-            problems.append("lint: known slot + strict-form first-party link must pass")
-        }
-        for mangled in ["see atlasautomates.com/work", "http://atlasautomates.com/x",
-                        "www.atlasautomates.com/x", "atlasautomates.com.evil.io/x",
-                        "check foo.biz now"]
-        where RevisionLint.problem(subject: nil, body: mangled) == nil {
-            problems.append("lint: '\(mangled)' must be refused (sender strips/mangles it)")
-        }
-        if RevisionLint.problem(subject: nil, body: "Hey {{ greetingLine }},") == nil {
-            problems.append("lint: spaced slot (sender substitution would miss it) must be refused")
-        }
-        if RevisionLint.problem(subject: nil, body: "Hey {{firstName}},") == nil {
-            problems.append("lint: unknown slot must be refused (would ship literal braces)")
-        }
-        if RevisionLint.problem(subject: nil, body: "book at calendly.com/adrian") == nil {
-            problems.append("lint: foreign link must be refused (sender strips it silently)")
-        }
-        if RevisionLint.problem(subject: "https://evil.example.com deal", body: nil) == nil {
-            problems.append("lint: foreign link in subject must be refused")
-        }
-
-        return problems
-    }
-
-    private static func kindName(_ data: WidgetData) -> String {
-        switch data {
-        case .kpi: return "kpi"
-        case .chart: return "chart"
-        case .table: return "table"
-        case .statusBoard: return "status-board"
-        }
-    }
-
-    /// Assert a LayoutSpec is renderable at every breakpoint: each widget has a rect,
-    /// each rect in-bounds (0 ≤ x, x+w ≤ cols, w/h ≥ 1), and no two widgets overlap.
-    /// Checks the UNION of every breakpoint source (spec.breakpoints, spec.cols, and
-    /// each widget's layout keys) so a rect emitted for a breakpoint the spec disagrees
-    /// on can't slip past unvalidated, and asserts per-breakpoint rect presence — both
-    /// guard against a future packer regression, not just today's output.
-    private static func validateGrid(_ spec: LayoutSpec, label: String) -> [String] {
-        var problems: [String] = []
-        var bps = Set(spec.breakpoints.keys)
-        bps.formUnion(spec.cols.keys)
-        for w in spec.widgets { bps.formUnion(w.layouts.keys) }
-
-        for bp in bps.sorted() {
-            guard let cols = spec.cols[bp] else {
-                problems.append("\(label): no cols defined for breakpoint '\(bp)'")
-                continue
-            }
-            var rects: [(id: String, r: GridRect)] = []
-            for widget in spec.widgets {
-                guard let rect = widget.layouts[bp] else {
-                    problems.append("\(label): widget '\(widget.id)' missing rect at \(bp)")
-                    continue
-                }
-                rects.append((widget.id, rect))
-            }
-            for (id, r) in rects {
-                if r.x < 0 || r.y < 0 || r.w < 1 || r.h < 1 {
-                    problems.append("\(label): widget '\(id)' has invalid rect at \(bp) (\(r.x),\(r.y),\(r.w),\(r.h))")
-                }
-                if r.x + r.w > cols {
-                    problems.append("\(label): widget '\(id)' overflows \(bp) cols (\(r.x)+\(r.w) > \(cols))")
-                }
-            }
-            for i in rects.indices {
-                for j in (i + 1)..<rects.count {
-                    if overlaps(rects[i].r, rects[j].r) {
-                        problems.append("\(label): '\(rects[i].id)' overlaps '\(rects[j].id)' at \(bp)")
-                    }
-                }
-            }
-        }
-        return problems
-    }
-
-    /// Half-open rectangle intersection on the integer grid.
-    private static func overlaps(_ a: GridRect, _ b: GridRect) -> Bool {
-        let xOverlap = a.x < b.x + b.w && b.x < a.x + a.w
-        let yOverlap = a.y < b.y + b.h && b.y < a.y + a.h
-        return xOverlap && yOverlap
-    }
-
-    /// Exercises the pipeline data path (all pure): test-vertical filtering, the
-    /// runsCap window, stage grouping/ordering, funnel/drops widgets, duration
-    /// formatting, the 7-day KPI window (injected `now`), the `partial` surface,
-    /// and JSONValue's deterministic pretty-printing (the inspector's renderer).
-    private static func pipelineChecks() -> [String] {
-        var problems: [String] = []
-
-        func run(_ id: String, vertical: String? = "toy", status: String? = "succeeded",
-                 started: String? = "2026-07-08T10:00:00+00:00",
-                 finished: String? = "2026-07-08T10:12:30+00:00") -> PipelineRunRow {
-            PipelineRunRow(runId: id, kind: "full", vertical: vertical,
-                           searchQuery: nil, status: status, error: nil, gitSha: nil,
-                           startedAt: started, finishedAt: finished)
-        }
-        func stage(_ rid: String, _ name: String, seq: Int, inN: Int?, outN: Int?,
-                   status: String = "succeeded", drops: [String: Double]? = nil) -> PipelineStageRow {
-            PipelineStageRow(id: seq, runId: rid, stage: name, seq: seq, status: status,
-                             countIn: inN, countOut: outN, drops: drops, spend: nil,
-                             error: nil, startedAt: nil, finishedAt: nil)
-        }
-
-        // Empty in → empty out, not partial.
-        let empty = PipelineRepository.compose(runs: [], stageRows: [], partial: false)
-        if !empty.runs.isEmpty || empty.partial {
-            problems.append("pipeline: empty compose should be empty + not partial")
-        }
-
-        // `__` test verticals are hidden (same convention as ce status).
-        let composed = PipelineRepository.compose(
-            runs: [run("r1"), run("__e2e-probe", vertical: "__e2e"), run("r2", status: "running", finished: nil)],
-            stageRows: [
-                stage("r1", "personalize", seq: 2, inN: 40, outN: 36,
-                      drops: ["agent_error": 3, "no_context": 1]),
-                stage("r1", "scrape", seq: 1, inN: nil, outN: 50),
-                stage("r1", "export", seq: 3, inN: 36, outN: 30, drops: ["unedited": 6]),
-            ],
-            partial: false)
-        if composed.runs.map(\.runId) != ["r1", "r2"] {
-            problems.append("pipeline: __ test verticals must be filtered (got \(composed.runs.map(\.runId)))")
-        }
-        // Stages grouped per run + seq-ordered regardless of fetch order.
-        if composed.stagesByRun["r1"]?.map(\.stage) != ["scrape", "personalize", "export"] {
-            problems.append("pipeline: stages must be seq-ordered per run")
-        }
-
-        // Builder: injected `now` pins the 7d KPI; funnel + drops widgets present.
-        let now = DateParse.iso("2026-07-10T00:00:00+00:00")!
-        let dash = PipelineBuilder.build(composed, now: now)
-        if case .kpi(let k)? = dash.widgets["kpi-runs-7d"], k.value != 2 {
-            problems.append("pipeline: runs-7d KPI should count both visible runs (got \(String(describing: dash.widgets["kpi-runs-7d"])))")
-        }
-        if case .statusBoard(let board)? = dash.widgets["latest-funnel"] {
-            if board.groups.map(\.label) != ["scrape –→50", "personalize 40→36", "export 36→30"] {
-                problems.append("pipeline: funnel labels/order wrong (got \(board.groups.map(\.label)))")
-            }
-        } else {
-            problems.append("pipeline: latest-funnel widget missing")
-        }
-        if case .statusBoard(let drops)? = dash.widgets["latest-drops"] {
-            // Sorted by count desc then name: unedited 6, agent_error 3, no_context 1.
-            if drops.groups.map(\.label) != ["unedited", "agent_error", "no_context"] {
-                problems.append("pipeline: drops ordering wrong (got \(drops.groups.map(\.label)))")
-            }
-        } else {
-            problems.append("pipeline: latest-drops widget missing")
-        }
-        if case .table(let t)? = dash.widgets["runs-table"] {
-            if t.title != "Pipeline Runs" {
-                problems.append("pipeline: non-partial table title wrong")
-            }
-            if t.rows.first?["duration"]?.displayString != "12m 30s" {
-                problems.append("pipeline: duration format wrong (got \(String(describing: t.rows.first?["duration"])))")
-            }
-            if t.rows.first?["out"]?.displayString.hasPrefix("30") != true {
-                problems.append("pipeline: leads-out should read the LAST stage with a count_out")
-            }
-        } else {
-            problems.append("pipeline: runs-table missing")
-        }
-
-        // Partial flag surfaces honestly in the table title.
-        let partialDash = PipelineBuilder.build(
-            PipelineRepository.compose(runs: [run("r1")], stageRows: [], partial: true), now: now)
-        if case .table(let t)? = partialDash.widgets["runs-table"],
-           !t.title.contains("partial data") {
-            problems.append("pipeline: partial flag must surface in the runs-table title")
-        }
-
-        // runsCap window: compose caps the visible list (repository fetches cap+1).
-        let many = (0...PipelineRepository.runsCap).map { run("r\($0)") }   // cap+1 runs
-        let capped = PipelineRepository.compose(runs: many, stageRows: [], partial: true)
-        if capped.runs.count != PipelineRepository.runsCap {
-            problems.append("pipeline: compose must cap visible runs at runsCap")
-        }
-
-        // Unfinished/missing timestamps render as em-dash, never a negative duration.
-        if PipelineBuilder.durationText(started: "2026-07-08T10:00:00+00:00", finished: nil) != "—"
-            || PipelineBuilder.durationText(started: nil, finished: nil) != "—" {
-            problems.append("pipeline: open-ended durations must render as —")
-        }
-
-        // Humanized run labels (P2): name · day · status, with honest fallbacks.
-        let label = PipelineBuilder.runLabel(
-            runId: "58894ce1-0000", vertical: "biotech-europe", kind: "full",
-            startedAt: "2026-07-09T14:00:00+00:00", status: "running")
-        if label.primary != "biotech-europe · Jul 9 · running" || label.hex != "58894ce1" {
-            problems.append("pipeline: runLabel wrong (got \(label))")
-        }
-        // NULL vertical = a standalone stage-script run — named, never bare hex.
-        let standalone = PipelineBuilder.runLabel(
-            runId: "abcd1234-0000", vertical: nil, kind: "stage",
-            startedAt: nil, status: nil)
-        if standalone.primary != "standalone stage · — · unknown" {
-            problems.append("pipeline: NULL-vertical label wrong (got \(standalone.primary))")
-        }
-        if PipelineBuilder.runLabel(runId: "x", vertical: " ", kind: nil,
-                                    startedAt: "not-a-date", status: "ok").primary
-            != "standalone run · — · ok" {
-            problems.append("pipeline: blank vertical / bad date must fall back cleanly")
-        }
-        // The runs table leads with the human name and demotes hex to the ID column.
-        if case .table(let t)? = dash.widgets["runs-table"] {
-            if t.columns.first?.key != "run" || t.columns.last?.key != "id" {
-                problems.append("pipeline: runs-table must lead with Run and end with ID")
-            }
-            if t.rows.first?["run"]?.displayString != "toy"
-                || t.rows.first?["id"]?.displayString != "r1" {
-                problems.append("pipeline: runs-table row should name the run + demote hex")
-            }
-        }
-        // Funnel title uses the humanized label.
-        if case .statusBoard(let b)? = dash.widgets["latest-funnel"],
-           !b.title.contains("toy · Jul 8 · succeeded") {
-            problems.append("pipeline: funnel title should use the humanized label (got \(String(describing: (dash.widgets["latest-funnel"]))))")
-        }
-
-        // Review-fix pins (P5 review round):
-        // 1) Phantom-'running' liveness bound — a stale 'running' run must NOT
-        //    count as live (it would pin the 8s poll cadence forever).
-        let livenessNow = DateParse.iso("2026-07-08T20:00:00+00:00")!
-        let fresh = run("fresh", status: "running",
-                        started: "2026-07-08T19:30:00+00:00", finished: nil)
-        let phantom = run("phantom", status: "running",
-                          started: "2026-07-08T02:00:00+00:00", finished: nil)
-        let noTimestamp = run("nots", status: "running", started: nil, finished: nil)
-        if !PipelineDashboardViewModel.isLiveRunning(fresh, now: livenessNow) {
-            problems.append("pipeline: a 30-min-old running run must count as live")
-        }
-        if PipelineDashboardViewModel.isLiveRunning(phantom, now: livenessNow) {
-            problems.append("pipeline: an 18h-old 'running' run is a phantom, not live")
-        }
-        if PipelineDashboardViewModel.isLiveRunning(noTimestamp, now: livenessNow) {
-            problems.append("pipeline: a 'running' run with no started_at must not count as live")
-        }
-        // 2) Stage window must come from VISIBLE runs — a burst of __ test runs
-        //    must not push the latest real run out of its own funnel window.
-        let windowRuns = [run("__t1", vertical: "__e2e"), run("__t2", vertical: "__e2e"),
-                          run("real1"), run("real2")]
-        if PipelineRepository.visibleRuns(windowRuns).map(\.runId) != ["real1", "real2"] {
-            problems.append("pipeline: visibleRuns must filter __ test runs before windowing")
-        }
-        // 3) Event key stays unique even when the optional PK is nil.
-        let nilIdEvent = { (stage: String) in
-            PipelineLeadEventRow(id: nil, runId: "r1", stage: stage, leadId: "l1",
-                                 status: "ok", dropReason: nil, input: nil,
-                                 output: nil, createdAt: "t1")
-        }
-        if nilIdEvent("research").stableKey == nilIdEvent("personalize").stableKey {
-            problems.append("pipeline: nil-id events must not share a stableKey (cards would collapse)")
-        }
-        // 4) String escaping: newlines/backslashes in copy render escaped, valid-JSON style.
-        if JSONValue.string("line1\nline2\\end\t.").prettyPrinted
-            != "\"line1\\nline2\\\\end\\t.\"" {
-            problems.append("pipeline: JSONValue string escaping wrong: \(JSONValue.string("line1\nline2\\end\t.").prettyPrinted)")
-        }
-
-        // JSONValue: deterministic pretty-print (sorted keys, ints without .0).
-        let snapshot = JSONValue.object([
-            "opener": .string("Saw the Tempe expansion"),
-            "confidence": .number(3),
-            "valid": .bool(true),
-            "tags": .array([.string("a"), .null]),
-        ])
-        let expected = """
-        {
-          "confidence": 3,
-          "opener": "Saw the Tempe expansion",
-          "tags": [
-            "a",
-            null
-          ],
-          "valid": true
-        }
-        """
-        if snapshot.prettyPrinted != expected {
-            problems.append("pipeline: JSONValue pretty-print not deterministic/expected:\n\(snapshot.prettyPrinted)")
-        }
-
-        return problems
-    }
 }

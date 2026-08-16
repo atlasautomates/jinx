@@ -31,7 +31,8 @@ enum LeadsFixtureSource {
     }
 
     /// A book big enough to exercise the list cap, every facet menu, and both
-    /// lanes. Deterministic: index-derived, no randomness.
+    /// lanes. Deterministic: index-derived, no randomness. Rows carry the
+    /// `v_cec_leads` shape (axes + booleans) the live decode produces.
     static func inputs(count: Int = 420, now: Date = Date()) -> DashboardInputs {
         let sources = ["sales-nav", "gmaps-leads", "jobsignal", "gmaps-email-discovered"]
         let industries = ["Solar energy company", "Banking", "biotech", "coffee carts",
@@ -44,7 +45,7 @@ enum LeadsFixtureSource {
         let stages = ["scraped", "researched", "personalized", "campaigned"]
 
         var leads: [LeadRow] = []
-        var deep = Set<String>(), personalized = Set<String>(), replied = Set<String>()
+        var replied = Set<String>()
         var sends: [DashboardInputs.SentEvent] = []
         var cal = Calendar(identifier: .iso8601)
         cal.timeZone = TimeZone(identifier: "UTC") ?? cal.timeZone
@@ -53,6 +54,7 @@ enum LeadsFixtureSource {
                         "Brightmoor", "Meadowpark"]
         let suffixes = ["Care", "Solar", "Labs", "Motors", "Credit Union", "Studio", "Living"]
 
+        let lastNames = ["Reyes", "Okafor", "Lindqvist", "Marsh", "Ito"]
         for i in 0..<max(1, count) {
             let id = String(format: "fixture-%04d", i)
             let place = places[i % places.count]
@@ -60,6 +62,12 @@ enum LeadsFixtureSource {
             let company = "\(prefixes[i % prefixes.count]) \(suffixes[(i / 7) % suffixes.count]) \(i)"
             // Spread creation over the trend window: ~6 leads per day back from now.
             let created = cal.date(byAdding: .day, value: -(i / 6), to: now) ?? now
+            let deep = i % 17 == 0
+            let personalized = deep || stage == "personalized" || stage == "campaigned"
+            // Every 41st row models the BROKEN write-path invariant: no
+            // lead_status row at all (nil axes + the flag), so the offline mode
+            // can render the "missing status rows" disclosure the live tab has.
+            let missingStatusRow = i % 41 == 40
             leads.append(LeadRow(
                 id: id,
                 companyName: company,
@@ -68,11 +76,20 @@ enum LeadsFixtureSource {
                 leadSource: sources[i % sources.count],
                 city: place.city, state: place.state,
                 createdAt: ISO8601DateFormatter().string(from: created),
-                enrichmentStage: stage,
-                location: place.location))
-            if stage == "personalized" || stage == "campaigned" { personalized.insert(id) }
-            if i % 17 == 0 { deep.insert(id); personalized.insert(id) }
-            if stage == "campaigned" {
+                outreach: missingStatusRow ? nil
+                    : (stage == "campaigned" ? "in_sequence" : "untouched"),
+                deepening: missingStatusRow ? nil : (deep ? "in_progress" : "none"),
+                personalized: missingStatusRow ? false : personalized,
+                hasResearch: missingStatusRow ? false : stage != "scraped",
+                statusRowMissing: missingStatusRow,
+                // country + search-only columns populated so `--fixture` search
+                // exercises the same columns the live query matches (email,
+                // last_name, full_name via the parts — QA fixture-gap finding).
+                location: place.location,
+                country: place.location == nil && place.state == nil ? "US" : nil,
+                lastName: lastNames[i % lastNames.count],
+                email: "contact\(i)@\(prefixes[i % prefixes.count].lowercased()).example"))
+            if stage == "campaigned" && !missingStatusRow {
                 if let sentAt = cal.date(byAdding: .day, value: -(i / 6) + 1, to: now) {
                     sends.append(.init(leadID: id, sentAt: ISO8601DateFormatter().string(from: sentAt)))
                 }
@@ -82,7 +99,6 @@ enum LeadsFixtureSource {
 
         return DashboardInputs(
             leads: leads, totalCount: leads.count, leadsComplete: true,
-            deepLaneLeadIDs: deep, personalizedLeadIDs: personalized,
             repliedLeadIDs: replied, messagedSends: sends)
     }
 
