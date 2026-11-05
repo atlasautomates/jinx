@@ -33,6 +33,20 @@ filter feels) can be answered without credentials. The still harness cannot answ
 them: `ImageRenderer` can't rasterize a `ScrollView`, so every `--screenshot` goes
 through the `staticRender` substitute path.
 
+Showcase mode, for portfolio screenshots (#113):
+
+```sh
+swift run CECDashboard --demo
+```
+
+`--demo` boots the real window over `Mock/DemoBook.swift`: 160 fictional solar
+installers, most fields filled and some deliberately blank, with a dossier
+and interaction timeline behind every row. Rows, search hits and pin chips open
+the profile sheet offline. Pins persist in `Application Support/CECDashboard-demo/`,
+never the real pin file. Contacts are provably fictional (`.example` domains,
+555-01xx phones), and `--selftest` enforces that. Like `--fixture`, it is
+DEBUG-only.
+
 ## Verify (headless)
 
 ```sh

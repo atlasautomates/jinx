@@ -57,8 +57,14 @@ final class DashboardViewModel {
     /// Dev-only offline load: the same map/filter path over a synthetic book, so the
     /// LIVE window can be driven without Keychain or network. Debug builds only —
     /// see `LeadsFixtureSource`.
-    func loadFixture() {
-        let snap = LeadSnapshot(LeadsFixtureSource.inputs())
+    func loadFixture() { loadOffline(LeadsFixtureSource.inputs()) }
+
+    /// `--demo` (#113): the synthetic solar showcase book, same derivation path.
+    func loadDemo() { loadOffline(DemoBook.inputs()) }
+
+    /// Shared body of the two offline books: no network, same derivation.
+    private func loadOffline(_ inputs: DashboardInputs) {
+        let snap = LeadSnapshot(inputs)
         snapshot = snap
         loadedAt = Date()
         state = .loaded(ABLeadsData(snapshot: snap, filter: filter))

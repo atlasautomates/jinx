@@ -52,6 +52,9 @@ enum SelfTest {
         // ── Pinned leads: PinsStore (P5) ────────────────────────────────────────────
         problems.append(contentsOf: pinsChecks())
 
+        // ── Demo book (#113): fictional, complete enough, partial enough ────────────
+        problems.append(contentsOf: demoBookChecks())
+
         // ⌘W lifecycle pin (review 2026-08-16): SwiftUI terminates a
         // closed-scene app unless the adaptor answers false here — flipping
         // this back to true is exactly the "closes and never comes back"
@@ -1331,6 +1334,85 @@ enum SelfTest {
                 + "(got \(sendsFailed.degradedReads))")
         }
 
+        return problems
+    }
+
+    /// The `--demo` book exists to be screenshotted and shown to strangers, so
+    /// its contacts must stay provably fictional (reserved `.example` domains,
+    /// 555-01xx phones). Every row must open a dossier (a dead click in a demo
+    /// is a broken demo), the funnel must show every stage, and some fields must
+    /// be blank, because a book with no gaps doesn't look real.
+    private static func demoBookChecks() -> [String] {
+        var problems: [String] = []
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        let book = DemoBook.inputs(now: now)
+        if book.leads.count != DemoBook.count {
+            problems.append("demo: book has \(book.leads.count) rows, expected \(DemoBook.count)")
+        }
+        if Set(book.leads.map(\.id)).count != book.leads.count {
+            problems.append("demo: duplicate lead ids")
+        }
+        if Set(book.leads.compactMap(\.companyName)).count != book.leads.count {
+            problems.append("demo: duplicate company names")
+        }
+        if DemoBook.inputs(now: now).leads.map(\.email) != book.leads.map(\.email) {
+            problems.append("demo: book is not deterministic")
+        }
+        var stages = Set<String>()
+        let emailed = Set(book.messagedSends.map(\.leadID))
+        for row in book.leads {
+            stages.insert(LeadFacets.stage(lead: row, emailed: emailed.contains(row.id),
+                                           replied: book.repliedLeadIDs.contains(row.id)))
+            guard let p = DemoBook.profile(for: row.id, now: now) else {
+                problems.append("demo: \(row.id) opens no dossier"); continue
+            }
+            if let e = p.lead.email, !e.hasSuffix(".example") {
+                problems.append("demo: \(row.id) email \(e) is not on a reserved domain")
+            }
+            if let w = p.lead.website, !w.contains(".example") {
+                problems.append("demo: \(row.id) website \(w) is not on a reserved domain")
+            }
+            if let ph = p.lead.phone, !ph.contains(") 555-01") {
+                problems.append("demo: \(row.id) phone \(ph) is outside the 555-01xx block")
+            }
+            if row.statusRowMissing == true {
+                problems.append("demo: \(row.id) carries the broken-invariant flag")
+            }
+            for send in book.messagedSends where send.leadID == row.id {
+                if let at = DateParse.iso(send.sentAt), at > now {
+                    problems.append("demo: \(row.id) has a send in the future")
+                }
+            }
+        }
+        for stage in ["Scraped", "Researched", "Personalized", "Campaigned", "Replied"]
+            where !stages.contains(stage) {
+            problems.append("demo: no lead at stage \(stage)")
+        }
+        let partial: [(String, (LeadRow) -> Bool)] = [
+            ("industry", { $0.industry == nil }), ("first name", { $0.firstName == nil }),
+            ("email", { $0.email == nil }), ("city/state", { $0.city == nil }),
+        ]
+        for (field, blank) in partial where !book.leads.contains(where: blank) {
+            problems.append("demo: no row leaves \(field) blank")
+        }
+        let profiles = book.leads.compactMap { DemoBook.profile(for: $0.id, now: now) }
+        let profileBlanks: [(String, (ProfileInputs) -> Bool)] = [
+            ("phone", { $0.lead.phone == nil }), ("website", { $0.lead.website == nil }),
+            ("research", { $0.enrichment == nil }),
+            ("personalization", { $0.enrichment?.personalizedOpener == nil }),
+        ]
+        for (field, blank) in profileBlanks where !profiles.contains(where: blank) {
+            problems.append("demo: no dossier leaves \(field) blank")
+        }
+        if profiles.contains(where: { $0.interactions.isEmpty }) {
+            problems.append("demo: a dossier opens to an empty timeline")
+        }
+        if DemoBook.profile(for: "fixture-0001", now: now) != nil {
+            problems.append("demo: a non-demo id resolved to a dossier")
+        }
+        if DemoBook.pinsDirectory() == PinsStore.defaultDirectory() {
+            problems.append("demo: pins would share the real pin file")
+        }
         return problems
     }
 

@@ -143,6 +143,20 @@ struct ABFixtureBanner: View {
     }
 }
 
+/// Quiet header pill for the `--demo` showcase book (#113).
+struct ABSampleNotice: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.adventor(DesignTokens.textXs))
+            .foregroundStyle(DesignTokens.textMuted)
+            .padding(.horizontal, DesignTokens.space2)
+            .padding(.vertical, DesignTokens.space1)
+            .overlay(Capsule().strokeBorder(DesignTokens.borderDefault, lineWidth: 1))
+    }
+}
+
 /// Slim banner shown above the last-good data when a refresh failed (Loadable
 /// `.stale`) — a warm, low-chroma note so degraded data is never mistaken for fresh.
 struct ABStaleBanner: View {

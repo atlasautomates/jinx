@@ -26,6 +26,9 @@ struct ABLeadsView: View {
     var staleMessage: String? = nil
     /// When set, an unmissable banner marks the dev-only offline fixture mode.
     var fixtureNotice: String? = nil
+    /// `--demo` (#113): a quiet header pill marking the showcase book. Muted on
+    /// purpose; it must not dominate a portfolio screenshot.
+    var sampleNotice: String? = nil
     /// When the data on screen was loaded ("as of 14:32"). Nothing else on the tab
     /// states the numbers' age, and the poll loop is a plain sleep — a lid opened
     /// after a weekend otherwise reads as current.
@@ -162,6 +165,7 @@ struct ABLeadsView: View {
             }
             Spacer(minLength: DesignTokens.space4)
             HStack(spacing: DesignTokens.space4) {
+                if let sampleNotice { ABSampleNotice(message: sampleNotice) }
                 if !data.degradedReads.isEmpty { ABDegradedChip(reads: data.degradedReads) }
                 summaryStat(value: data.totals.scraped, label: "scraped", color: DesignTokens.textSecondary)
                 summaryStat(value: data.totals.emailed, label: "emailed", color: DesignTokens.accent)

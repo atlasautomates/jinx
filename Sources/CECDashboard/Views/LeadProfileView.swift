@@ -15,6 +15,9 @@ struct LeadProfileView: View {
     /// Drop the ScrollView for a plain stack: ImageRenderer captures a
     /// ScrollView's viewport as empty (same flag as ABLeadsView).
     var staticRender = false
+    /// `--demo` (#113): never fall through to the live fetch, even when the
+    /// demo book has no dossier for this id.
+    var offline = false
 
     @State private var model = LeadProfileModel()
     @Environment(\.dismiss) private var dismiss
@@ -32,7 +35,7 @@ struct LeadProfileView: View {
         .frame(minWidth: 680, idealWidth: 760, minHeight: 560, idealHeight: 680)
         .background(Palette.bgRoot)
         .task(id: ref.id) {
-            guard previewInputs == nil else { return }
+            guard previewInputs == nil, !offline else { return }
             await model.load(ref)
         }
     }

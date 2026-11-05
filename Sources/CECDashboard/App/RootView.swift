@@ -17,10 +17,13 @@ struct RootView: View {
     // tap opens the live profile sheet — a Keychain + network path one click
     // away in the mode whose whole claim is "no Keychain, no network"
     // (contention lens; same discipline as LeadProfileFixture's previewPins).
+    // `--demo` pins persist in their own directory (#113) so a screenshot
+    // session can set its pinned strip up once; they never touch the real file.
     @State private var pinsModel = LeadsFixtureSource.isRequested
         ? PinsModel(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("CECDashboard-fixture-pins-\(UUID().uuidString)",
                                     isDirectory: true))
+        : DemoBook.isRequested ? PinsModel(directory: DemoBook.pinsDirectory())
         : PinsModel()
     // @State is load-bearing: it persists ONE TitlebarHover across body re-evals, so its
     // `installed` guard stays true and only one hover view is ever injected. Don't demote.
@@ -41,7 +44,12 @@ struct RootView: View {
                 // Explicit injection: sheet content is a separate presentation
                 // host — never rely on cross-boundary environment inheritance
                 // (platform review; the pin button consumes both).
-                LeadProfileView(ref: ref)
+                // `--demo`: the dossier comes from the demo book, never the
+                // network. An id outside the book renders the empty profile.
+                LeadProfileView(ref: ref,
+                                previewInputs: DemoBook.isRequested
+                                    ? DemoBook.profile(for: ref.id) : nil,
+                                offline: DemoBook.isRequested)
                     .environment(profilePresenter)
                     .environment(pinsModel)
             }
@@ -49,7 +57,7 @@ struct RootView: View {
             .task { await initialLeadsLoad() }       // initial load
             // Offline dev mode never reaches for the Keychain or the network —
             // which is the whole point of not running the refresh loops.
-            .task { if !LeadsFixtureSource.isRequested { await periodicRefresh() } }
+            .task { if !Self.offline { await periodicRefresh() } }
             // Two sibling .task children instead of one task group: same
             // concurrency, view-lifetime cancellation for free, and no capture
             // pattern the Swift 6 region-isolation checker refuses to check
@@ -69,11 +77,12 @@ struct RootView: View {
     /// Normal launch → live fetch. `--fixture` (DEBUG-only) → synthetic book, no
     /// Keychain and no network, so the REAL window can be driven offline while
     /// iterating on layout the still harness cannot capture (scroll behaviour).
+    /// Either offline book (`--fixture` or `--demo`): no Keychain, no network.
+    private static var offline: Bool { LeadsFixtureSource.isRequested || DemoBook.isRequested }
+
     private func initialLeadsLoad() async {
-        if LeadsFixtureSource.isRequested {
-            model.loadFixture()
-            searchModel.fixtureRows = model.snapshotLeads
-            syncSearchScope()
+        if Self.offline {
+            loadOfflineBook()
         } else {
             // Never leave a fixture book behind a live snapshot: search would keep
             // answering from synthetic rows while the tab showed real ones.
@@ -90,7 +99,7 @@ struct RootView: View {
     /// and keeps painting pre-sleep numbers. (The "as of HH:mm" stamp in the header
     /// is the belt to this pair of braces.)
     private func refreshOn(_ center: NotificationCenter, _ name: Notification.Name) async {
-        guard !LeadsFixtureSource.isRequested else { return }
+        guard !Self.offline else { return }
         for await _ in center.notifications(named: name) {
             await reloadLeads()
         }
@@ -195,10 +204,11 @@ struct RootView: View {
             // In fixture mode a refresh would perform the REAL Keychain + network
             // load, replacing (or, on failure, re-labelling) synthetic rows as live
             // ones. The view treats nil as "no refresh control".
-            onRefresh: fixture ? nil : { model.requestLoad() },
+            onRefresh: Self.offline ? nil : { model.requestLoad() },
             isRefreshing: model.isRefreshing,
             staleMessage: staleMessage,
             fixtureNotice: fixture ? LeadsFixtureSource.banner : nil,
+            sampleNotice: DemoBook.isRequested ? DemoBook.notice : nil,
             loadedAt: fixture ? nil : model.loadedAt,
             requestedFilter: model.filter,
             onFilterChange: { newFilter in
@@ -229,12 +239,14 @@ struct RootView: View {
 
     /// Retry from the error state — offline mode retries the fixture, not the network.
     private func retryLeads() {
-        if LeadsFixtureSource.isRequested {
-            model.loadFixture()
-            searchModel.fixtureRows = model.snapshotLeads
-            syncSearchScope()
-        } else {
-            model.requestLoad()
-        }
+        if Self.offline { loadOfflineBook() } else { model.requestLoad() }
+    }
+
+    /// `--demo` or `--fixture`: load the synthetic book and point the offline
+    /// search at it. Never touches the Keychain or the network.
+    private func loadOfflineBook() {
+        if DemoBook.isRequested { model.loadDemo() } else { model.loadFixture() }
+        searchModel.fixtureRows = model.snapshotLeads
+        syncSearchScope()
     }
 }
