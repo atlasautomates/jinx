@@ -1,3 +1,20 @@
+# Jinx
+
+Jinx is the lead dashboard behind Atlas Automates' outreach pipeline: a native
+macOS (SwiftUI) app over a Postgres/Supabase lead book. It shows funnel KPIs,
+trends, breakdowns, search, filters, and a per-lead dossier with the full
+interaction timeline the backend records.
+
+**Read-only showcase.** This repository is published as a record of the work,
+June to November 2026. It is extracted from a private monorepo, so some docs
+refer to paths and plans that aren't included here. Contributions, issues and
+pull requests are not accepted. No license is granted.
+
+Try it without any credentials: `swift run CECDashboard --demo` boots the
+real window over a synthetic book of fictional solar companies.
+
+---
+
 # Lead Dashboard
 
 Native macOS (SwiftUI) dashboard for Supabase lead data — ONE surface (Leads),
